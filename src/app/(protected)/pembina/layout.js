@@ -14,9 +14,9 @@ const menuItems = [
     icon: "dashboard",
   },
   {
-    label: "Data Anggota",
-    href: "/pembina/data-anggota",
-    icon: "groups",
+    label: "Manajemen Kegiatan",
+    href: "/pembina/kegiatan",
+    icon: "event_available",
   },
   {
     label: "Absensi Anggota",
@@ -24,14 +24,9 @@ const menuItems = [
     icon: "fact_check",
   },
   {
-    label: "Manajemen Kegiatan",
-    href: "/pembina/kegiatan",
-    icon: "event_available",
-  },
-  {
-    label: "Pendaftaran Anggota",
-    href: "/pembina/pendaftaran",
-    icon: "person_add",
+    label: "Data Anggota",
+    href: "/pembina/data-anggota",
+    icon: "groups",
   },
   {
     label: "Pengumuman",

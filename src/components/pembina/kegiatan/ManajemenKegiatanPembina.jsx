@@ -9,13 +9,11 @@ import {
   firstError,
   formatBytes,
   formatDate,
-  formatDateTime,
   isLoading,
   rowsOf,
   sortDateDesc,
 } from "@/components/pembina/_shared/firestoreHelpers";
 import {
-  ActivityStatusBadge,
   Avatar,
   DisabledAction,
   EmptyState,
@@ -24,10 +22,11 @@ import {
   PageLoading,
   ProposalStatusBadge,
   ReportStatusBadge,
-  SectionHeader,
   StatCard,
   Tabs,
 } from "@/components/pembina/_shared/PembinaUi";
+import ProgramKerjaSection from "./sub-components/ProgramKerjaSection";
+import RapatSection from "./sub-components/RapatSection";
 
 export default function ManajemenKegiatanPembina() {
   const { colRef } = useDb();
@@ -48,6 +47,7 @@ export default function ManajemenKegiatanPembina() {
   const [tab, setTab] = useState("kegiatan");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [activityType, setActivityType] = useState("work_program");
 
   const loading = isLoading(activities, proposals, members, divisions);
   const error = firstError(activities, proposals, members, divisions);
@@ -71,6 +71,9 @@ export default function ManajemenKegiatanPembina() {
     return {
       activityRows: sortDateDesc(activityRows, "startAt").map((item) => ({
         ...item,
+        // Data lama tanpa activityType tetap dianggap sebagai Program Kerja.
+        activityType:
+          item.activityType === "meeting" ? "meeting" : "work_program",
         division: divisionMap.get(item.divisionId) || null,
         organiser: memberMap.get(item.organiserMemberId) || null,
       })),
@@ -121,6 +124,8 @@ export default function ManajemenKegiatanPembina() {
           setSearch={setSearch}
           statusFilter={statusFilter}
           setStatusFilter={setStatusFilter}
+          activityType={activityType}
+          setActivityType={setActivityType}
         />
       )}
 
@@ -153,133 +158,74 @@ function ActivitiesTab({
   setSearch,
   statusFilter,
   setStatusFilter,
+  activityType,
+  setActivityType,
 }) {
-  const keyword = search.trim().toLowerCase();
-  const filtered = rows.filter((item) => {
-    return (
-      (!keyword ||
-        item.title?.toLowerCase().includes(keyword) ||
-        item.location?.toLowerCase().includes(keyword) ||
-        item.description?.toLowerCase().includes(keyword)) &&
-      (statusFilter === "all" || item.status === statusFilter)
-    );
-  });
+  const workProgramRows = rows.filter(
+    (item) => item.activityType === "work_program"
+  );
+  const meetingRows = rows.filter(
+    (item) => item.activityType === "meeting"
+  );
+
+  const handleTypeChange = (value) => {
+    setActivityType(value);
+    setSearch("");
+    setStatusFilter("all");
+  };
+
+  const typeSelector = (
+    <section className="mt-6 flex flex-col gap-4 rounded-2xl border border-border bg-card p-5 shadow-sm lg:flex-row lg:items-center lg:justify-between">
+      <div>
+        <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">
+          Tipe Kegiatan
+        </p>
+        <h2 className="mt-1 font-bold text-text">
+          Pilih Program Kerja atau Rapat
+        </h2>
+        <p className="mt-1 text-xs leading-5 text-text-muted">
+          Setiap tipe ditampilkan dan dikelola melalui komponen terpisah.
+        </p>
+      </div>
+
+      <Tabs
+        value={activityType}
+        onChange={handleTypeChange}
+        items={[
+          {
+            value: "work_program",
+            label: `Program Kerja (${workProgramRows.length})`,
+          },
+          {
+            value: "meeting",
+            label: `Rapat (${meetingRows.length})`,
+          },
+        ]}
+      />
+    </section>
+  );
 
   return (
     <div className="mt-6">
-      <section className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          icon="event_available"
-          label="Total Kegiatan"
-          value={rows.length}
-          helper="Seluruh kegiatan Firestore"
+      {activityType === "work_program" && (
+        <ProgramKerjaSection
+          rows={workProgramRows}
+          search={search}
+          setSearch={setSearch}
+          statusFilter={statusFilter}
+          setStatusFilter={setStatusFilter}
+          typeSelector={typeSelector}
         />
-        <StatCard
-          icon="calendar_month"
-          label="Akan Datang"
-          value={rows.filter((item) => item.status === "upcoming").length}
-          helper="Belum dimulai"
-          accent="blue"
-        />
-        <StatCard
-          icon="fact_check"
-          label="Berlangsung"
-          value={rows.filter((item) => item.status === "ongoing").length}
-          helper="Sedang dilaksanakan"
-          accent="amber"
-        />
-        <StatCard
-          icon="check"
-          label="Selesai"
-          value={rows.filter((item) => item.status === "completed").length}
-          helper="Sudah ditutup"
-          accent="green"
-        />
-      </section>
+      )}
 
-      <FilterBar
-        title="Daftar Kegiatan"
-        count={filtered.length}
-        search={search}
-        setSearch={setSearch}
-        statusFilter={statusFilter}
-        setStatusFilter={setStatusFilter}
-        options={[
-          ["draft", "Draf"],
-          ["upcoming", "Akan Datang"],
-          ["ongoing", "Berlangsung"],
-          ["completed", "Selesai"],
-          ["cancelled", "Dibatalkan"],
-        ]}
-      />
-
-      {filtered.length ? (
-        <section className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-          {filtered.map((activity) => (
-            <article
-              key={activity.id}
-              className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm"
-            >
-              <div className="border-b border-border p-5">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h2 className="font-bold text-text">
-                        {activity.title}
-                      </h2>
-                      <ActivityStatusBadge status={activity.status} />
-                    </div>
-                    <p className="mt-2 max-h-12 overflow-hidden text-sm leading-6 text-text-muted">
-                      {activity.description || "Tidak ada deskripsi."}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    disabled
-                    className="rounded-lg p-2 text-text-muted opacity-60"
-                  >
-                    <AppIcon name="more_vert" size={20} />
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4 p-5">
-                <Meta label="Waktu" value={formatDateTime(activity.startAt)} />
-                <Meta label="Lokasi" value={activity.location || "-"} />
-                <Meta
-                  label="Penyelenggara"
-                  value={
-                    activity.division
-                      ? `Sekbid ${activity.division.code}: ${activity.division.shortName}`
-                      : "Pengurus Inti"
-                  }
-                />
-                <Meta
-                  label="Peserta"
-                  value={`${activity.participantCount || 0}/${
-                    activity.participantCapacity || "-"
-                  }`}
-                />
-              </div>
-
-              <div className="flex flex-wrap justify-end gap-2 border-t border-border bg-surface p-4">
-                <DisabledAction icon="visibility" variant="neutral">
-                  Detail
-                </DisabledAction>
-                <DisabledAction icon="edit" variant="outline">
-                  Edit
-                </DisabledAction>
-                <DisabledAction icon="block" variant="danger">
-                  Batalkan
-                </DisabledAction>
-              </div>
-            </article>
-          ))}
-        </section>
-      ) : (
-        <EmptyState
-          icon="event_available"
-          title="Kegiatan tidak ditemukan"
+      {activityType === "meeting" && (
+        <RapatSection
+          rows={meetingRows}
+          search={search}
+          setSearch={setSearch}
+          statusFilter={statusFilter}
+          setStatusFilter={setStatusFilter}
+          typeSelector={typeSelector}
         />
       )}
     </div>
@@ -585,19 +531,6 @@ function FilterBar({
         </select>
       </div>
     </section>
-  );
-}
-
-function Meta({ label, value }) {
-  return (
-    <div className="rounded-xl bg-surface p-4">
-      <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
-        {label}
-      </p>
-      <p className="mt-2 text-sm font-semibold leading-6 text-text">
-        {value}
-      </p>
-    </div>
   );
 }
 

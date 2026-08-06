@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import AppIcon from "@/components/global/AppIcon";
 import { useDb } from "@/context/DbContext";
@@ -23,9 +23,18 @@ import {
   PageLoading,
   StatCard,
 } from "@/components/pembina/_shared/PembinaUi";
+import BadanPengurusSection, {
+  isBadanPengurus,
+  isBadanPengurusDivision,
+  sortBadanPengurus,
+  sortSekbidMembers,
+} from "./sub-components/BadanPengurusSection";
+import PendingReviewSection from "./sub-components/PendingReviewSection";
+import { useAnggotaDetailOverlay } from "./sub-components/AnggotaDetailOverlay";
 
 export default function DataAnggotaPembina() {
   const { colRef } = useDb();
+  const { openAnggotaDetail } = useAnggotaDetailOverlay();
 
   const members = useCollection(() => colRef("Anggota"), [], {
     enabled: true,
@@ -46,6 +55,9 @@ export default function DataAnggotaPembina() {
   const [divisionFilter, setDivisionFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [periodFilter, setPeriodFilter] = useState("all");
+  const tableScrollRef = useRef(null);
+
+  const currentPeriod = "2026/2027";
 
   const loading = isLoading(members, divisions, periods, summaries);
   const error = firstError(members, divisions, periods, summaries);
@@ -53,6 +65,7 @@ export default function DataAnggotaPembina() {
   const data = useMemo(() => {
     const divisionRows = rowsOf(divisions);
     const summaryRows = rowsOf(summaries);
+
     const divisionMap = new Map(
       divisionRows.map((item) => [item.id, item])
     );
@@ -60,41 +73,82 @@ export default function DataAnggotaPembina() {
       summaryRows.map((item) => [item.memberId, item])
     );
 
-    const official = rowsOf(members)
-      .filter((item) =>
-        ["active", "inactive", "suspended"].includes(
-          item.membershipStatus
-        )
+    const memberRows = rowsOf(members).map((item) => ({
+      ...item,
+      division: divisionMap.get(item.divisionId) || null,
+      summary: summaryMap.get(item.id) || null,
+    }));
+
+    const official = memberRows.filter((item) =>
+      ["active", "inactive", "suspended"].includes(
+        item.membershipStatus
       )
-      .map((item) => ({
-        ...item,
-        division: divisionMap.get(item.divisionId) || null,
-        summary: summaryMap.get(item.id) || null,
-      }));
+    );
+
+    const pendingMembers = sortDateDesc(
+      memberRows
+        .filter(
+          (item) => item.membershipStatus === "pending_review"
+        )
+        .map((item) => ({
+          ...item,
+          reviewSubmittedAt:
+            item.submittedAt || item.createdAt || item.updatedAt,
+        })),
+      "reviewSubmittedAt"
+    );
 
     const keyword = search.trim().toLowerCase();
 
-    const filtered = sortDateDesc(official, "updatedAt").filter((item) => {
-      const matchesSearch =
-        !keyword ||
-        item.fullName?.toLowerCase().includes(keyword) ||
-        item.nis?.toLowerCase().includes(keyword) ||
-        item.className?.toLowerCase().includes(keyword) ||
-        item.organisationPosition?.toLowerCase().includes(keyword);
+    const matchesSearch = (item) =>
+      !keyword ||
+      item.fullName?.toLowerCase().includes(keyword) ||
+      item.nis?.toLowerCase().includes(keyword) ||
+      item.className?.toLowerCase().includes(keyword) ||
+      item.organisationPosition?.toLowerCase().includes(keyword);
 
-      return (
-        matchesSearch &&
+    const matchesBaseFilters = (item) =>
+      (statusFilter === "all" ||
+        item.membershipStatus === statusFilter) &&
+      (periodFilter === "all" || item.period === periodFilter);
+
+    const allBoardMembers = official.filter(isBadanPengurus);
+    const allSekbidMembers = official.filter(
+      (item) => !isBadanPengurus(item)
+    );
+
+    // Badan Pengurus selalu ditampilkan secara utuh dan tidak ikut
+    // terpengaruh pencarian maupun filter sekbid, status, dan periode.
+    const boardMembers = sortBadanPengurus(allBoardMembers);
+
+    const filteredSekbidMembers = allSekbidMembers.filter(
+      (item) =>
+        matchesBaseFilters(item) &&
+        matchesSearch(item) &&
         (divisionFilter === "all" ||
-          item.divisionId === divisionFilter) &&
-        (statusFilter === "all" ||
-          item.membershipStatus === statusFilter) &&
-        (periodFilter === "all" || item.period === periodFilter)
-      );
-    });
+          item.divisionId === divisionFilter)
+    );
+
+    // Saat satu sekbid dipilih, Ketua Sekbid berada pada urutan pertama.
+    const filtered =
+      divisionFilter === "all"
+        ? sortDateDesc(filteredSekbidMembers, "updatedAt")
+        : sortSekbidMembers(filteredSekbidMembers);
+
+    // Badan Pengurus tidak ditampilkan pada dropdown Sekbid.
+    const sekbidRows = divisionRows.filter(
+      (division) => !isBadanPengurusDivision(division)
+    );
+
+    const hasStoredBoardDivision = divisionRows.some(
+      isBadanPengurusDivision
+    );
 
     return {
       official,
+      pendingMembers,
       filtered,
+      boardMembers,
       active: official.filter(
         (item) => item.membershipStatus === "active"
       ).length,
@@ -104,7 +158,10 @@ export default function DataAnggotaPembina() {
       suspended: official.filter(
         (item) => item.membershipStatus === "suspended"
       ).length,
-      divisionRows,
+      sekbidRows,
+      divisionTotal:
+        sekbidRows.length +
+        (hasStoredBoardDivision || allBoardMembers.length ? 1 : 0),
     };
   }, [
     members,
@@ -116,14 +173,21 @@ export default function DataAnggotaPembina() {
     periodFilter,
   ]);
 
+  useEffect(() => {
+    // Pastikan tabel kembali ke sisi kiri setelah isi/filter berubah.
+    // Ini mencegah tabel terlihat bergeser apabila sebelumnya pengguna
+    // sempat melakukan horizontal scroll.
+    tableScrollRef.current?.scrollTo({ left: 0, top: 0 });
+  }, [search, divisionFilter, statusFilter, periodFilter]);
+
   if (loading) return <PageLoading message="Memuat data anggota..." />;
   if (error) return <PageError message={error.message} />;
 
   return (
-    <div>
+    <div className="min-w-0">
       <PageHeading
         eyebrow="Database Pengurus"
-        title="Data Anggota OSIS"
+        title={`Data Anggota OSIS Periode ${currentPeriod}`}
         description="Manajemen tampilan data anggota resmi, jabatan, sekbid, status, dan ringkasan kehadiran."
         action={
           <div className="flex flex-wrap gap-3">
@@ -152,8 +216,8 @@ export default function DataAnggotaPembina() {
         <StatCard
           icon="badge"
           label="Divisi / Sekbid"
-          value={data.divisionRows.length}
-          helper="Jumlah unit organisasi"
+          value={data.divisionTotal}
+          helper="Termasuk Badan Pengurus"
           accent="blue"
         />
         <StatCard
@@ -165,16 +229,20 @@ export default function DataAnggotaPembina() {
         />
       </section>
 
-      <section className="mt-7 overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+      <PendingReviewSection members={data.pendingMembers} />
+
+      <BadanPengurusSection members={data.boardMembers} />
+
+      <section className="mt-7 min-w-0 overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
         <div className="flex flex-col gap-4 border-b border-border p-5 xl:flex-row xl:items-center xl:justify-between">
           <div>
-            <h2 className="font-bold text-text">Daftar Anggota</h2>
+            <h2 className="font-bold text-text">Daftar Anggota Sekbid</h2>
             <p className="mt-1 text-xs text-text-muted">
               {data.filtered.length} data ditampilkan.
             </p>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid w-full min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 xl:w-auto xl:grid-cols-4">
             <div className="relative">
               <AppIcon
                 name="search"
@@ -193,10 +261,10 @@ export default function DataAnggotaPembina() {
             <select
               value={divisionFilter}
               onChange={(event) => setDivisionFilter(event.target.value)}
-              className="min-h-11 rounded-xl border border-border bg-input px-3 text-sm outline-none focus:border-primary"
+              className="min-h-11 min-w-0 w-full rounded-xl border border-border bg-input px-3 text-sm outline-none focus:border-primary"
             >
               <option value="all">Semua Sekbid</option>
-              {data.divisionRows.map((division) => (
+              {data.sekbidRows.map((division) => (
                 <option key={division.id} value={division.id}>
                   Sekbid {division.code} - {division.shortName}
                 </option>
@@ -206,7 +274,7 @@ export default function DataAnggotaPembina() {
             <select
               value={statusFilter}
               onChange={(event) => setStatusFilter(event.target.value)}
-              className="min-h-11 rounded-xl border border-border bg-input px-3 text-sm outline-none focus:border-primary"
+              className="min-h-11 min-w-0 w-full rounded-xl border border-border bg-input px-3 text-sm outline-none focus:border-primary"
             >
               <option value="all">Semua Status</option>
               <option value="active">Aktif</option>
@@ -217,7 +285,7 @@ export default function DataAnggotaPembina() {
             <select
               value={periodFilter}
               onChange={(event) => setPeriodFilter(event.target.value)}
-              className="min-h-11 rounded-xl border border-border bg-input px-3 text-sm outline-none focus:border-primary"
+              className="min-h-11 min-w-0 w-full rounded-xl border border-border bg-input px-3 text-sm outline-none focus:border-primary"
             >
               <option value="all">Semua Periode</option>
               {rowsOf(periods).map((period) => (
@@ -229,8 +297,8 @@ export default function DataAnggotaPembina() {
           </div>
         </div>
 
-        {data.filtered.length ? (
-          <div className="overflow-x-auto">
+        <div ref={tableScrollRef} className="w-full min-w-0 overflow-x-auto">
+          {data.filtered.length ? (
             <table className="w-full min-w-[1050px] text-left">
               <thead className="bg-input text-xs uppercase tracking-wider text-text-muted">
                 <tr>
@@ -240,13 +308,26 @@ export default function DataAnggotaPembina() {
                   <th className="px-5 py-4">Jabatan / Sekbid</th>
                   <th className="px-5 py-4">Kehadiran</th>
                   <th className="px-5 py-4 text-center">Status</th>
-                  <th className="px-5 py-4 text-right">Aksi</th>
+                  <th className="w-14 px-5 py-4" aria-label="Buka detail" />
                 </tr>
               </thead>
 
               <tbody className="divide-y divide-border">
                 {data.filtered.map((member) => (
-                  <tr key={member.id} className="hover:bg-input/40">
+                  <tr
+                    key={member.id}
+                    role="button"
+                    tabIndex={0}
+                    title={`Lihat detail ${member.fullName || "anggota"}`}
+                    onClick={() => openAnggotaDetail(member)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        openAnggotaDetail(member);
+                      }
+                    }}
+                    className="group cursor-pointer transition-colors hover:bg-input/60 focus-visible:bg-input/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary"
+                  >
                     <td className="px-5 py-4 text-sm font-medium text-text">
                       {member.nis || "-"}
                     </td>
@@ -273,7 +354,7 @@ export default function DataAnggotaPembina() {
                       <p className="mt-1 text-xs text-text-muted">
                         {member.division
                           ? `Sekbid ${member.division.code}: ${member.division.shortName}`
-                          : "Pengurus Inti"}
+                          : "Belum memiliki sekbid"}
                       </p>
                     </td>
                     <td className="px-5 py-4">
@@ -306,43 +387,26 @@ export default function DataAnggotaPembina() {
                         status={member.membershipStatus}
                       />
                     </td>
-                    <td className="px-5 py-4">
-                      <div className="flex justify-end gap-1">
-                        <IconButton icon="visibility" label="Detail" />
-                        <IconButton icon="edit" label="Edit" />
-                        <IconButton icon="block" label="Nonaktifkan" danger />
-                      </div>
+                    <td className="w-14 px-5 py-4 text-right">
+                      <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl text-text-muted transition group-hover:translate-x-0.5 group-hover:bg-primary/10 group-hover:text-primary">
+                        <AppIcon name="chevron_right" size={21} />
+                      </span>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </div>
-        ) : (
-          <div className="p-5">
-            <EmptyState
-              icon="groups"
-              title="Anggota tidak ditemukan"
-              description="Coba ubah pencarian atau filter."
-            />
-          </div>
-        )}
+          ) : (
+            <div className="min-h-44 p-5">
+              <EmptyState
+                icon="groups"
+                title="Anggota sekbid tidak ditemukan"
+                description="Coba ubah pencarian atau filter yang digunakan."
+              />
+            </div>
+          )}
+        </div>
       </section>
     </div>
-  );
-}
-
-function IconButton({ icon, label, danger = false }) {
-  return (
-    <button
-      type="button"
-      disabled
-      title={`${label} akan diaktifkan pada tahap berikutnya`}
-      className={`rounded-lg p-2 opacity-60 ${
-        danger ? "text-error-text" : "text-primary"
-      }`}
-    >
-      <AppIcon name={icon} size={19} />
-    </button>
   );
 }
