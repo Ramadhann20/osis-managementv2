@@ -27,6 +27,7 @@ import {
 } from "@/components/pembina/_shared/PembinaUi";
 import ProgramKerjaSection from "./sub-components/ProgramKerjaSection";
 import RapatSection from "./sub-components/RapatSection";
+import { useSeleksiKegiatanOverlay } from "./sub-components/SeleksiKegiatanOverlay";
 
 export default function ManajemenKegiatanPembina() {
   const { colRef } = useDb();
@@ -69,6 +70,10 @@ export default function ManajemenKegiatanPembina() {
     );
 
     return {
+      memberRows: memberRows.filter((item) =>
+        ["active", "inactive", "suspended"].includes(item.membershipStatus)
+      ),
+      divisionRows,
       activityRows: sortDateDesc(activityRows, "startAt").map((item) => ({
         ...item,
         // Data lama tanpa activityType tetap dianggap sebagai Program Kerja.
@@ -90,6 +95,18 @@ export default function ManajemenKegiatanPembina() {
     };
   }, [activities, proposals, members, divisions]);
 
+  const { openSeleksiKegiatan } = useSeleksiKegiatanOverlay({
+    proposals: data.proposalRows,
+    divisions: data.divisionRows,
+    members: data.memberRows,
+    onCreated: (selectedType) => {
+      setTab("kegiatan");
+      setActivityType(selectedType);
+      setSearch("");
+      setStatusFilter("all");
+    },
+  });
+
   if (loading) return <PageLoading message="Memuat manajemen kegiatan..." />;
   if (error) return <PageError message={error.message} />;
 
@@ -100,7 +117,14 @@ export default function ManajemenKegiatanPembina() {
         title="Manajemen Kegiatan"
         description="Kelola tampilan kegiatan, review proposal, dan laporan pelaksanaan dalam satu menu."
         action={
-          <DisabledAction icon="add">Tambah Kegiatan</DisabledAction>
+          <button
+            type="button"
+            onClick={openSeleksiKegiatan}
+            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-white shadow-sm transition duration-300 ease-out hover:-translate-y-0.5 hover:bg-primary-hover hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 active:translate-y-0"
+          >
+            <AppIcon name="add" size={19} />
+            Tambah Kegiatan
+          </button>
         }
       />
 
