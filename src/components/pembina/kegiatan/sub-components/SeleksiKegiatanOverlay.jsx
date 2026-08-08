@@ -3,14 +3,16 @@
 import { useCallback, useMemo, useState } from "react";
 
 import AppIcon from "@/components/global/AppIcon";
+import { collection, doc, writeBatch } from "firebase/firestore";
 import { useDb } from "@/context/DbContext";
 import { useOverlay } from "@/context/ui/OverlayContext";
+import { generateActivityReferenceId } from "@/lib/codefication";
 
 const CATEGORY_OPTIONS = [
   {
     value: "work_program",
     label: "Program Kerja",
-    description: "Kegiatan utama yang dapat dihubungkan dengan proposal.",
+    description: "Rencana kegiatan yang dapat dihubungkan dengan proposal anggota.",
     icon: "campaign",
   },
   {
@@ -21,22 +23,466 @@ const CATEGORY_OPTIONS = [
   },
 ];
 
+const DEFAULT_SESSION_START = "08:00";
+const DEFAULT_SESSION_END = "12:00";
+const MAX_SERIES_OCCURRENCES = 500;
+
 const INITIAL_FORM = {
   title: "",
   description: "",
-  startAt: "",
-  endAt: "",
-  location: "",
   divisionId: "",
-  organiserMemberId: "",
-  participantCapacity: "",
+  location: "",
+
+  // Jadwal hasil pleno / rencana awal. Ini menjadi dasar reminder proposal.
+  scheduleMode: "once",
+  startDate: "",
+  endDate: "",
+  dailySchedules: {},
+  recurrenceInterval: "1",
+  recurrenceUntil: "",
+
   proposalId: "",
+
+  // Jadwal final hanya dipakai untuk Program Kerja yang sudah memiliki proposal.
+  // Meeting tetap memakai jadwal utama sebagai jadwal final.
+  finalScheduleSource: "planned",
+  finalScheduleMode: "once",
+  finalStartDate: "",
+  finalEndDate: "",
+  finalDailySchedules: {},
+  finalRecurrenceInterval: "1",
+  finalRecurrenceUntil: "",
+
+  organiserMemberId: "",
+  committeeMemberIds: [],
 };
+
+function combineDateAndTime(date, time) {
+  if (!date || !time) return null;
+  const value = new Date(`${date}T${time}`);
+  return Number.isNaN(value.getTime()) ? null : value;
+}
+
+function calculateDurationMinutes(startAt, endAt) {
+  if (!(startAt instanceof Date) || !(endAt instanceof Date)) return 0;
+  const duration = Math.floor((endAt.getTime() - startAt.getTime()) / 60000);
+  return duration > 0 ? duration : 0;
+}
+
+function formatDuration(minutes) {
+  if (!minutes) return "0";
+
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  const parts = [];
+
+  if (hours) parts.push(`${hours} jam`);
+  if (restMinutes) parts.push(`${restMinutes} menit`);
+
+  return parts.join(" ") || "0";
+}
+
+function parseDateOnly(value) {
+  if (!value) return null;
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function toDateKey(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function formatDateOnly(value) {
+  const date = typeof value === "string" ? parseDateOnly(value) : value;
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "-";
+  return new Intl.DateTimeFormat("id-ID", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  }).format(date);
+}
+
+function listDateKeys(startDate, endDate, maxDays = 366) {
+  const start = parseDateOnly(startDate);
+  const end = parseDateOnly(endDate);
+  if (!start || !end || end < start) return [];
+
+  const dates = [];
+  const cursor = new Date(start);
+  while (cursor <= end && dates.length < maxDays) {
+    dates.push(toDateKey(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return dates;
+}
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object || {}, key);
+}
+
+function buildBaseSessions(form) {
+  const dates = listDateKeys(form.startDate, form.endDate);
+
+  return dates.map((date, index) => {
+    const custom = form.dailySchedules?.[date] || {};
+    const startTime = hasOwn(custom, "startTime")
+      ? custom.startTime
+      : DEFAULT_SESSION_START;
+    const endTime = hasOwn(custom, "endTime")
+      ? custom.endTime
+      : DEFAULT_SESSION_END;
+    const startAt = combineDateAndTime(date, startTime);
+    const endAt = combineDateAndTime(date, endTime);
+    const durationMinutes = calculateDurationMinutes(startAt, endAt);
+
+    return {
+      date,
+      dayOffset: index,
+      startTime,
+      endTime,
+      startAt,
+      endAt,
+      durationMinutes,
+      valid: Boolean(startAt && endAt && durationMinutes > 0),
+    };
+  });
+}
+
+function buildOccurrenceStarts(form, maxItems = MAX_SERIES_OCCURRENCES) {
+  const start = parseDateOnly(form.startDate);
+  if (!start) return [];
+  if (form.scheduleMode !== "recurring") return [start];
+
+  const until = parseDateOnly(form.recurrenceUntil);
+  if (!until || until < start) return [];
+
+  const intervalWeeks = Math.max(1, Number(form.recurrenceInterval) || 1);
+  const results = [];
+  const cursor = new Date(start);
+
+  while (cursor <= until && results.length < maxItems) {
+    results.push(new Date(cursor));
+    cursor.setDate(cursor.getDate() + intervalWeeks * 7);
+  }
+
+  return results;
+}
+
+function buildOccurrences(form, baseSessions, maxItems = MAX_SERIES_OCCURRENCES) {
+  if (!baseSessions.length) return [];
+
+  const starts = buildOccurrenceStarts(form, maxItems);
+  const recurrenceBoundary =
+    form.scheduleMode === "recurring" ? parseDateOnly(form.recurrenceUntil) : null;
+  const results = [];
+
+  for (let occurrenceIndex = 0; occurrenceIndex < starts.length; occurrenceIndex += 1) {
+    const occurrenceStart = starts[occurrenceIndex];
+    const sessions = baseSessions.map((template, sessionIndex) => {
+      const sessionDate = new Date(occurrenceStart);
+      sessionDate.setDate(sessionDate.getDate() + template.dayOffset);
+      const date = toDateKey(sessionDate);
+      return {
+        ...template,
+        sessionIndex,
+        date,
+        startAt: combineDateAndTime(date, template.startTime),
+        endAt: combineDateAndTime(date, template.endTime),
+      };
+    });
+
+    const lastDate = parseDateOnly(sessions[sessions.length - 1]?.date);
+    if (recurrenceBoundary && lastDate && lastDate > recurrenceBoundary) break;
+
+    results.push({
+      occurrenceIndex,
+      startDate: sessions[0]?.date || toDateKey(occurrenceStart),
+      endDate: sessions[sessions.length - 1]?.date || toDateKey(occurrenceStart),
+      sessions,
+    });
+  }
+
+  return results;
+}
+
+function buildOccurrencePreview(form, baseSessions, maxItems = MAX_SERIES_OCCURRENCES) {
+  return buildOccurrences(form, baseSessions, maxItems);
+}
+
+function normalizeDateInput(value) {
+  if (!value) return "";
+
+  if (typeof value === "string") {
+    const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (match) return match[1];
+
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? "" : toDateKey(parsed);
+  }
+
+  if (value instanceof Date) return toDateKey(value);
+
+  if (typeof value?.toDate === "function") {
+    const parsed = value.toDate();
+    return parsed instanceof Date && !Number.isNaN(parsed.getTime())
+      ? toDateKey(parsed)
+      : "";
+  }
+
+  return "";
+}
+
+function extractProposalSchedule(proposal) {
+  if (!proposal) return null;
+
+  const source =
+    proposal.proposedSchedule ||
+    proposal.executionSchedule ||
+    proposal.scheduleProposal ||
+    proposal.schedule ||
+    {};
+
+  const startDate = normalizeDateInput(
+    source.startDate ||
+      source.firstStartDate ||
+      proposal.proposedStartDate ||
+      proposal.startDate ||
+      proposal.activityDate
+  );
+
+  const endDate =
+    normalizeDateInput(
+      source.endDate ||
+        source.firstEndDate ||
+        proposal.proposedEndDate ||
+        proposal.endDate ||
+        proposal.activityEndDate
+    ) || startDate;
+
+  if (!startDate || !endDate) return null;
+
+  const scheduleMode =
+    source.mode === "recurring" ||
+    source.scheduleMode === "recurring" ||
+    source.recurrence?.enabled === true
+      ? "recurring"
+      : "once";
+
+  const recurrenceInterval = String(
+    source.recurrenceInterval ||
+      source.interval ||
+      source.recurrence?.interval ||
+      1
+  );
+
+  const recurrenceUntil = normalizeDateInput(
+    source.recurrenceUntil ||
+      source.until ||
+      source.recurrence?.until
+  );
+
+  const dailySchedules = {};
+
+  if (Array.isArray(source.sessionTemplate)) {
+    const dates = listDateKeys(startDate, endDate);
+    source.sessionTemplate.forEach((session, index) => {
+      const date = dates[index];
+      if (!date) return;
+      dailySchedules[date] = {
+        startTime: session?.startTime || DEFAULT_SESSION_START,
+        endTime: session?.endTime || DEFAULT_SESSION_END,
+      };
+    });
+  }
+
+  if (source.dailySchedules && typeof source.dailySchedules === "object") {
+    Object.entries(source.dailySchedules).forEach(([date, schedule]) => {
+      if (!date) return;
+      dailySchedules[date] = {
+        startTime: schedule?.startTime || DEFAULT_SESSION_START,
+        endTime: schedule?.endTime || DEFAULT_SESSION_END,
+      };
+    });
+  }
+
+  return {
+    scheduleMode,
+    startDate,
+    endDate,
+    dailySchedules,
+    recurrenceInterval,
+    recurrenceUntil:
+      scheduleMode === "recurring" ? recurrenceUntil || endDate : "",
+  };
+}
+
+function extractProposedCommittee(proposal) {
+  if (!proposal) {
+    return {
+      mode: "unknown",
+      organiserMemberId: "",
+      memberIds: [],
+    };
+  }
+
+  const source =
+    proposal.proposedCommittee ||
+    proposal.committeeProposal ||
+    proposal.proposedTeam ||
+    {};
+
+  const organiserMemberId =
+    source.organiserMemberId ||
+    source.leadMemberId ||
+    source.committeeLeadMemberId ||
+    proposal.proposedOrganiserMemberId ||
+    proposal.proposedCommitteeLeadMemberId ||
+    "";
+
+  const rawMemberIds =
+    source.memberIds ||
+    source.committeeMemberIds ||
+    proposal.proposedCommitteeMemberIds ||
+    [];
+
+  const memberIds = Array.from(
+    new Set(
+      (Array.isArray(rawMemberIds) ? rawMemberIds : [])
+        .filter(Boolean)
+        .map(String)
+    )
+  );
+
+  const explicitMode =
+    source.mode ||
+    proposal.proposedCommitteeMode ||
+    proposal.committeeProposalMode ||
+    "";
+
+  const mode =
+    explicitMode === "supervisor_decides" ||
+    explicitMode === "delegated_to_supervisor"
+      ? "supervisor_decides"
+      : organiserMemberId || memberIds.length
+        ? "proposed"
+        : explicitMode || "unknown";
+
+  return {
+    mode,
+    organiserMemberId: organiserMemberId ? String(organiserMemberId) : "",
+    memberIds,
+  };
+}
+
+function buildFinalScheduleForm(form) {
+  return {
+    scheduleMode: form.finalScheduleMode,
+    startDate: form.finalStartDate,
+    endDate: form.finalEndDate,
+    dailySchedules: form.finalDailySchedules,
+    recurrenceInterval: form.finalRecurrenceInterval,
+    recurrenceUntil: form.finalRecurrenceUntil,
+  };
+}
+
+function scheduleSummary(form, baseSessions) {
+  if (!form?.startDate || !form?.endDate || !baseSessions?.length) return "-";
+
+  const range =
+    form.startDate === form.endDate
+      ? formatDateOnly(form.startDate)
+      : `${formatDateOnly(form.startDate)} - ${formatDateOnly(form.endDate)}`;
+
+  if (form.scheduleMode !== "recurring") return range;
+
+  return `${range} · setiap ${Math.max(
+    1,
+    Number(form.recurrenceInterval) || 1
+  )} minggu${
+    form.recurrenceUntil ? ` · s.d. ${formatDateOnly(form.recurrenceUntil)}` : ""
+  }`;
+}
+
+function scheduleDiffers(a, b) {
+  if (!a || !b) return false;
+
+  return Boolean(
+    a.startDate !== b.startDate ||
+      a.endDate !== b.endDate ||
+      a.scheduleMode !== b.scheduleMode ||
+      (a.scheduleMode === "recurring" &&
+        (String(a.recurrenceInterval || "1") !==
+          String(b.recurrenceInterval || "1") ||
+          a.recurrenceUntil !== b.recurrenceUntil))
+  );
+}
+
+async function commitSetChunks(db, writes, chunkSize = 425) {
+  const committedRefs = [];
+
+  for (let index = 0; index < writes.length; index += chunkSize) {
+    const chunk = writes.slice(index, index + chunkSize);
+    const batch = writeBatch(db);
+    chunk.forEach(({ ref, data }) => batch.set(ref, data));
+    await batch.commit();
+    committedRefs.push(...chunk.map(({ ref }) => ref));
+  }
+
+  return committedRefs;
+}
+
+async function deleteRefsInChunks(db, refs, chunkSize = 425) {
+  for (let index = 0; index < refs.length; index += chunkSize) {
+    const chunk = refs.slice(index, index + chunkSize);
+    const batch = writeBatch(db);
+    chunk.forEach((ref) => batch.delete(ref));
+    await batch.commit().catch(() => {});
+  }
+}
+
+function proposalTitle(proposal) {
+  return (
+    proposal?.activity?.title ||
+    proposal?.title ||
+    proposal?.fileName ||
+    "Proposal tanpa judul"
+  );
+}
+
+function resolveUploader(proposal, memberMap) {
+  const uploaderId = proposal?.uploadedBy || null;
+
+  const member =
+    proposal?.uploader ||
+    (uploaderId ? memberMap.get(String(uploaderId)) : null) ||
+    null;
+
+  return {
+    id: uploaderId || "Unknown",
+    name:
+      member?.fullName ||
+      member?.name ||
+      member?.username ||
+      "Unknown",
+    position:
+      member?.organisationPosition ||
+      member?.position ||
+      member?.role ||
+      "Unknown",
+  };
+}
 
 export function useSeleksiKegiatanOverlay({
   proposals = [],
   divisions = [],
   members = [],
+  periodId = null,
+  periodEndDate = "",
   onCreated,
 } = {}) {
   const { openOverlay, closeOverlay } = useOverlay();
@@ -49,6 +495,8 @@ export function useSeleksiKegiatanOverlay({
           proposals={proposals}
           divisions={divisions}
           members={members}
+          periodId={periodId}
+          periodEndDate={periodEndDate}
           onCreated={(selectedType) => {
             onCreated?.(selectedType);
             closeOverlay();
@@ -63,6 +511,8 @@ export function useSeleksiKegiatanOverlay({
     proposals,
     divisions,
     members,
+    periodId,
+    periodEndDate,
     onCreated,
   ]);
 
@@ -73,45 +523,226 @@ export default function SeleksiKegiatanModal({
   proposals = [],
   divisions = [],
   members = [],
+  periodId = null,
+  periodEndDate = "",
   onCreated,
   onClose,
 }) {
-  const { addDoc, serverTimestamp } = useDb();
+  const { db, addDoc, updateDoc, deleteDoc, serverTimestamp } = useDb();
 
   const [step, setStep] = useState("select");
   const [activityType, setActivityType] = useState("work_program");
   const [form, setForm] = useState(INITIAL_FORM);
+  const [proposalPanelOpen, setProposalPanelOpen] = useState(false);
+  const [proposalSearch, setProposalSearch] = useState("");
+  const [committeeSearch, setCommitteeSearch] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  const proposalOptions = useMemo(
-    () =>
-      [...proposals].sort((a, b) =>
-        String(a?.title || a?.activity?.title || "").localeCompare(
-          String(b?.title || b?.activity?.title || ""),
-          "id"
-        )
-      ),
-    [proposals]
-  );
+  const memberMap = useMemo(() => {
+    const map = new Map();
+
+    members.forEach((member) => {
+      [member?.id, member?.uid, member?.userId, member?.authUid]
+        .filter(Boolean)
+        .forEach((key) => map.set(String(key), member));
+    });
+
+    return map;
+  }, [members]);
 
   const officialMembers = useMemo(
     () =>
       [...members].sort((a, b) =>
-        String(a?.fullName || "").localeCompare(
-          String(b?.fullName || ""),
+        String(a?.fullName || a?.name || "").localeCompare(
+          String(b?.fullName || b?.name || ""),
           "id"
         )
       ),
     [members]
   );
 
+  const proposalOptions = useMemo(() => {
+    const keyword = proposalSearch.trim().toLowerCase();
+
+    return [...proposals]
+      .filter((proposal) => {
+        if (!keyword) return true;
+
+        const uploader = resolveUploader(proposal, memberMap);
+        return Boolean(
+          proposalTitle(proposal).toLowerCase().includes(keyword) ||
+            String(proposal?.fileName || "").toLowerCase().includes(keyword) ||
+            String(uploader.name).toLowerCase().includes(keyword) ||
+            String(uploader.position).toLowerCase().includes(keyword) ||
+            String(uploader.id).toLowerCase().includes(keyword)
+        );
+      })
+      .sort((a, b) => proposalTitle(a).localeCompare(proposalTitle(b), "id"));
+  }, [proposals, proposalSearch, memberMap]);
+
+  const selectedProposal = useMemo(
+    () => proposals.find((proposal) => proposal.id === form.proposalId) || null,
+    [proposals, form.proposalId]
+  );
+
+  const filteredCommitteeMembers = useMemo(() => {
+    const keyword = committeeSearch.trim().toLowerCase();
+
+    if (!keyword) return officialMembers;
+
+    return officialMembers.filter((member) =>
+      [
+        member?.fullName,
+        member?.name,
+        member?.organisationPosition,
+        member?.position,
+      ]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(keyword))
+    );
+  }, [officialMembers, committeeSearch]);
+
+  // Rencana awal hasil pleno. Untuk Program Kerja, data ini belum membuat
+  // PelaksanaanKegiatan/SesiAbsensi sebelum proposal dipilih dan jadwal difinalisasi.
+  const baseSessions = useMemo(
+    () => buildBaseSessions(form),
+    [form.startDate, form.endDate, form.dailySchedules]
+  );
+
+  const dayCount = baseSessions.length;
+  const validSessionCount = baseSessions.filter((session) => session.valid).length;
+  const totalScheduledMinutes = baseSessions.reduce(
+    (total, session) => total + (session.valid ? session.durationMinutes : 0),
+    0
+  );
+  const startDateValue = parseDateOnly(form.startDate);
+  const endDateValue = parseDateOnly(form.endDate);
+  const hasValidDateRange = Boolean(
+    startDateValue && endDateValue && endDateValue >= startDateValue
+  );
+  const hasValidAttendanceSchedule = Boolean(
+    dayCount > 0 && validSessionCount === dayCount
+  );
+  const firstSession = baseSessions[0] || null;
+  const lastSession = baseSessions[baseSessions.length - 1] || null;
+  const hasSelectedProposal = Boolean(selectedProposal);
+
+  const occurrencePreview = useMemo(
+    () => buildOccurrencePreview(form, baseSessions, MAX_SERIES_OCCURRENCES),
+    [
+      form.scheduleMode,
+      form.recurrenceInterval,
+      form.recurrenceUntil,
+      form.startDate,
+      form.endDate,
+      form.dailySchedules,
+    ]
+  );
+
+  const proposalSchedule = useMemo(
+    () => extractProposalSchedule(selectedProposal),
+    [selectedProposal]
+  );
+
+  const proposedCommittee = useMemo(
+    () => extractProposedCommittee(selectedProposal),
+    [selectedProposal]
+  );
+
+  const proposalBaseSessions = useMemo(
+    () => (proposalSchedule ? buildBaseSessions(proposalSchedule) : []),
+    [proposalSchedule]
+  );
+
+  const finalScheduleForm = useMemo(
+    () => buildFinalScheduleForm(form),
+    [
+      form.finalScheduleMode,
+      form.finalStartDate,
+      form.finalEndDate,
+      form.finalDailySchedules,
+      form.finalRecurrenceInterval,
+      form.finalRecurrenceUntil,
+    ]
+  );
+
+  const finalBaseSessions = useMemo(
+    () => buildBaseSessions(finalScheduleForm),
+    [
+      finalScheduleForm.startDate,
+      finalScheduleForm.endDate,
+      finalScheduleForm.dailySchedules,
+    ]
+  );
+
+  const finalDayCount = finalBaseSessions.length;
+  const finalValidSessionCount = finalBaseSessions.filter(
+    (session) => session.valid
+  ).length;
+  const finalTotalScheduledMinutes = finalBaseSessions.reduce(
+    (total, session) => total + (session.valid ? session.durationMinutes : 0),
+    0
+  );
+  const finalStartDateValue = parseDateOnly(form.finalStartDate);
+  const finalEndDateValue = parseDateOnly(form.finalEndDate);
+  const hasValidFinalDateRange = Boolean(
+    finalStartDateValue &&
+      finalEndDateValue &&
+      finalEndDateValue >= finalStartDateValue
+  );
+  const hasValidFinalAttendanceSchedule = Boolean(
+    finalDayCount > 0 && finalValidSessionCount === finalDayCount
+  );
+
+  const finalOccurrencePreview = useMemo(
+    () =>
+      hasSelectedProposal
+        ? buildOccurrencePreview(
+            finalScheduleForm,
+            finalBaseSessions,
+            MAX_SERIES_OCCURRENCES
+          )
+        : [],
+    [
+      hasSelectedProposal,
+      finalScheduleForm.scheduleMode,
+      finalScheduleForm.recurrenceInterval,
+      finalScheduleForm.recurrenceUntil,
+      finalScheduleForm.startDate,
+      finalScheduleForm.endDate,
+      finalScheduleForm.dailySchedules,
+      finalBaseSessions,
+    ]
+  );
+
+  const plannedScheduleForCompare = useMemo(
+    () => ({
+      scheduleMode: form.scheduleMode,
+      startDate: form.startDate,
+      endDate: form.endDate,
+      recurrenceInterval: form.recurrenceInterval,
+      recurrenceUntil: form.recurrenceUntil,
+    }),
+    [
+      form.scheduleMode,
+      form.startDate,
+      form.endDate,
+      form.recurrenceInterval,
+      form.recurrenceUntil,
+    ]
+  );
+
+  const proposalScheduleIsDifferent = Boolean(
+    proposalSchedule && scheduleDiffers(plannedScheduleForCompare, proposalSchedule)
+  );
+
   const chooseCategory = (value) => {
     setActivityType(value);
-    setForm((current) => ({
-      ...current,
-      proposalId: value === "work_program" ? current.proposalId : "",
-    }));
+    setForm(INITIAL_FORM);
+    setProposalPanelOpen(false);
+    setProposalSearch("");
+    setCommitteeSearch("");
     setError("");
     setStep("form");
   };
@@ -119,9 +750,21 @@ export default function SeleksiKegiatanModal({
   const changeType = (value) => {
     setActivityType(value);
     setForm((current) => ({
-      ...current,
-      proposalId: value === "work_program" ? current.proposalId : "",
+      ...INITIAL_FORM,
+      title: current.title,
+      description: current.description,
+      divisionId: current.divisionId,
+      location: current.location,
+      scheduleMode: current.scheduleMode,
+      startDate: current.startDate,
+      endDate: current.endDate,
+      dailySchedules: current.dailySchedules,
+      recurrenceInterval: current.recurrenceInterval,
+      recurrenceUntil: current.recurrenceUntil,
     }));
+    setProposalPanelOpen(false);
+    setProposalSearch("");
+    setCommitteeSearch("");
     setError("");
   };
 
@@ -131,61 +774,614 @@ export default function SeleksiKegiatanModal({
     if (error) setError("");
   };
 
+  const updateStartDate = (event) => {
+    const value = event.target.value;
+    setForm((current) => {
+      const nextEndDate = !current.endDate || current.endDate < value ? value : current.endDate;
+      return {
+        ...current,
+        startDate: value,
+        endDate: nextEndDate,
+      };
+    });
+    if (error) setError("");
+  };
+
+  const updateEndDate = (event) => {
+    const value = event.target.value;
+    setForm((current) => ({
+      ...current,
+      endDate: value,
+    }));
+    if (error) setError("");
+  };
+
+  const updateDailySchedule = (date, field) => (event) => {
+    const value = event.target.value;
+    setForm((current) => ({
+      ...current,
+      dailySchedules: {
+        ...current.dailySchedules,
+        [date]: {
+          ...(current.dailySchedules?.[date] || {}),
+          [field]: value,
+        },
+      },
+    }));
+    if (error) setError("");
+  };
+
+  const setScheduleMode = (mode) => {
+    setForm((current) => ({
+      ...current,
+      scheduleMode: mode,
+      recurrenceUntil:
+        mode === "recurring"
+          ? current.recurrenceUntil || periodEndDate || ""
+          : current.recurrenceUntil,
+    }));
+    if (error) setError("");
+  };
+
+  const toggleCommitteeMember = (memberId) => {
+    setForm((current) => {
+      const exists = current.committeeMemberIds.includes(memberId);
+      return {
+        ...current,
+        committeeMemberIds: exists
+          ? current.committeeMemberIds.filter((id) => id !== memberId)
+          : [...current.committeeMemberIds, memberId],
+      };
+    });
+  };
+
+  const updateFinalField = (field) => (event) => {
+    const value = event.target.value;
+    setForm((current) => ({
+      ...current,
+      [field]: value,
+      finalScheduleSource: "manual",
+    }));
+    if (error) setError("");
+  };
+
+  const updateFinalStartDate = (event) => {
+    const value = event.target.value;
+    setForm((current) => {
+      const nextEndDate =
+        !current.finalEndDate || current.finalEndDate < value
+          ? value
+          : current.finalEndDate;
+
+      return {
+        ...current,
+        finalStartDate: value,
+        finalEndDate: nextEndDate,
+        finalScheduleSource: "manual",
+      };
+    });
+    if (error) setError("");
+  };
+
+  const updateFinalEndDate = (event) => {
+    const value = event.target.value;
+    setForm((current) => ({
+      ...current,
+      finalEndDate: value,
+      finalScheduleSource: "manual",
+    }));
+    if (error) setError("");
+  };
+
+  const updateFinalDailySchedule = (date, field) => (event) => {
+    const value = event.target.value;
+    setForm((current) => ({
+      ...current,
+      finalScheduleSource: "manual",
+      finalDailySchedules: {
+        ...current.finalDailySchedules,
+        [date]: {
+          ...(current.finalDailySchedules?.[date] || {}),
+          [field]: value,
+        },
+      },
+    }));
+    if (error) setError("");
+  };
+
+  const setFinalScheduleMode = (mode) => {
+    setForm((current) => ({
+      ...current,
+      finalScheduleMode: mode,
+      finalScheduleSource: "manual",
+      finalRecurrenceUntil:
+        mode === "recurring"
+          ? current.finalRecurrenceUntil || periodEndDate || current.finalEndDate || ""
+          : current.finalRecurrenceUntil,
+    }));
+    if (error) setError("");
+  };
+
+  const applyScheduleToFinal = (source) => {
+    setForm((current) => {
+      const chosen =
+        source === "proposal" && proposalSchedule
+          ? proposalSchedule
+          : {
+              scheduleMode: current.scheduleMode,
+              startDate: current.startDate,
+              endDate: current.endDate,
+              dailySchedules: current.dailySchedules,
+              recurrenceInterval: current.recurrenceInterval,
+              recurrenceUntil: current.recurrenceUntil,
+            };
+
+      return {
+        ...current,
+        finalScheduleSource: source === "proposal" && proposalSchedule ? "proposal" : "planned",
+        finalScheduleMode: chosen.scheduleMode || "once",
+        finalStartDate: chosen.startDate || "",
+        finalEndDate: chosen.endDate || chosen.startDate || "",
+        finalDailySchedules: { ...(chosen.dailySchedules || {}) },
+        finalRecurrenceInterval: String(chosen.recurrenceInterval || "1"),
+        finalRecurrenceUntil:
+          chosen.scheduleMode === "recurring"
+            ? chosen.recurrenceUntil || periodEndDate || chosen.endDate || ""
+            : "",
+      };
+    });
+    if (error) setError("");
+  };
+
+  const applyProposedCommittee = () => {
+    setForm((current) => ({
+      ...current,
+      organiserMemberId: proposedCommittee.organiserMemberId || "",
+      committeeMemberIds: [...proposedCommittee.memberIds],
+    }));
+    if (error) setError("");
+  };
+
+  const selectProposal = (proposal) => {
+    if (proposal.activityId) return;
+
+    setForm((current) => ({
+      ...current,
+      proposalId: proposal.id,
+      finalScheduleSource: "planned",
+      finalScheduleMode: current.scheduleMode,
+      finalStartDate: current.startDate,
+      finalEndDate: current.endDate,
+      finalDailySchedules: { ...current.dailySchedules },
+      finalRecurrenceInterval: current.recurrenceInterval,
+      finalRecurrenceUntil: current.recurrenceUntil,
+      organiserMemberId: "",
+      committeeMemberIds: [],
+    }));
+    setError("");
+    setProposalPanelOpen(false);
+  };
+
+  const clearProposal = () => {
+    setForm((current) => ({
+      ...current,
+      proposalId: "",
+      finalScheduleSource: "planned",
+      finalScheduleMode: "once",
+      finalStartDate: "",
+      finalEndDate: "",
+      finalDailySchedules: {},
+      finalRecurrenceInterval: "1",
+      finalRecurrenceUntil: "",
+      organiserMemberId: "",
+      committeeMemberIds: [],
+    }));
+  };
+
   const submitForm = async (event) => {
     event.preventDefault();
 
     const title = form.title.trim();
     const location = form.location.trim();
 
-    if (!title || !form.startAt || !location) {
-      setError("Nama kegiatan, waktu mulai, dan lokasi wajib diisi.");
+    if (!title || !location || !form.startDate || !form.endDate) {
+      setError("Nama kegiatan, lokasi, tanggal mulai, dan tanggal selesai wajib diisi.");
       return;
     }
 
-    if (
-      form.endAt &&
-      new Date(form.endAt).getTime() < new Date(form.startAt).getTime()
-    ) {
-      setError("Waktu selesai tidak boleh lebih awal dari waktu mulai.");
+    if (!hasValidDateRange) {
+      setError("Tanggal selesai tidak boleh sebelum tanggal mulai.");
       return;
     }
+
+    if (!hasValidAttendanceSchedule) {
+      setError("Setiap jadwal harian harus memiliki jam mulai dan selesai yang valid.");
+      return;
+    }
+
+    if (form.scheduleMode === "recurring") {
+      if (!form.recurrenceUntil) {
+        setError("Tentukan sampai kapan kegiatan berulang.");
+        return;
+      }
+      if (form.recurrenceUntil < form.endDate) {
+        setError("Batas pengulangan harus mencakup seluruh rencana pelaksanaan pertama.");
+        return;
+      }
+      if (periodEndDate && form.recurrenceUntil > periodEndDate) {
+        setError("Rencana kegiatan berulang tidak boleh melewati akhir periode aktif.");
+        return;
+      }
+    }
+
+    if (form.proposalId && !selectedProposal) {
+      setError("Proposal yang dipilih tidak ditemukan. Silakan pilih ulang.");
+      return;
+    }
+
+    if (selectedProposal?.activityId) {
+      setError("Proposal tersebut sudah terhubung dengan kegiatan lain.");
+      return;
+    }
+
+    const plannedOccurrences = buildOccurrences(
+      form,
+      baseSessions,
+      MAX_SERIES_OCCURRENCES
+    );
+
+    if (!plannedOccurrences.length) {
+      setError("Tidak ada rencana pelaksanaan valid yang dapat dibuat dari jadwal tersebut.");
+      return;
+    }
+
+    const shouldFinalizeWorkProgram =
+      activityType === "work_program" && hasSelectedProposal;
+
+    if (shouldFinalizeWorkProgram) {
+      if (!form.finalStartDate || !form.finalEndDate || !hasValidFinalDateRange) {
+        setError("Jadwal final harus memiliki tanggal mulai dan selesai yang valid.");
+        return;
+      }
+
+      if (!hasValidFinalAttendanceSchedule) {
+        setError("Setiap jadwal final harian harus memiliki jam mulai dan selesai yang valid.");
+        return;
+      }
+
+      if (form.finalScheduleMode === "recurring") {
+        if (!form.finalRecurrenceUntil) {
+          setError("Tentukan sampai kapan jadwal final berulang.");
+          return;
+        }
+        if (form.finalRecurrenceUntil < form.finalEndDate) {
+          setError("Batas pengulangan final harus mencakup seluruh pelaksanaan pertama.");
+          return;
+        }
+        if (periodEndDate && form.finalRecurrenceUntil > periodEndDate) {
+          setError("Jadwal final tidak boleh melewati akhir periode aktif.");
+          return;
+        }
+      }
+    }
+
+    const shouldGenerateChildren =
+      activityType === "meeting" || shouldFinalizeWorkProgram;
+
+    const effectiveScheduleForm =
+      shouldFinalizeWorkProgram ? finalScheduleForm : form;
+
+    const effectiveBaseSessions =
+      shouldFinalizeWorkProgram ? finalBaseSessions : baseSessions;
+
+    const occurrences = shouldGenerateChildren
+      ? buildOccurrences(
+          effectiveScheduleForm,
+          effectiveBaseSessions,
+          MAX_SERIES_OCCURRENCES
+        )
+      : [];
+
+    if (shouldGenerateChildren && !occurrences.length) {
+      setError("Tidak ada pelaksanaan final yang dapat dibuat dari jadwal tersebut.");
+      return;
+    }
+
+    const plannedTotalSessionCount = plannedOccurrences.reduce(
+      (total, occurrence) => total + occurrence.sessions.length,
+      0
+    );
+
+    const totalSessionCount = occurrences.reduce(
+      (total, occurrence) => total + occurrence.sessions.length,
+      0
+    );
+
+    const plannedFirstOccurrence = plannedOccurrences[0];
+    const plannedLastOccurrence =
+      plannedOccurrences[plannedOccurrences.length - 1];
+    const plannedFirstSession = plannedFirstOccurrence?.sessions?.[0] || null;
+    const plannedFirstLastSession =
+      plannedFirstOccurrence?.sessions?.[
+        plannedFirstOccurrence.sessions.length - 1
+      ] || null;
+    const plannedSeriesLastSession =
+      plannedLastOccurrence?.sessions?.[
+        plannedLastOccurrence.sessions.length - 1
+      ] || null;
+
+    const firstOccurrence = occurrences[0] || null;
+    const lastOccurrence = occurrences[occurrences.length - 1] || null;
+    const firstOccurrenceFirstSession = firstOccurrence?.sessions?.[0] || null;
+    const firstOccurrenceLastSession =
+      firstOccurrence?.sessions?.[
+        firstOccurrence.sessions.length - 1
+      ] || null;
+    const seriesLastSession =
+      lastOccurrence?.sessions?.[lastOccurrence.sessions.length - 1] || null;
+
+    const activeFirstSession =
+      firstOccurrenceFirstSession || plannedFirstSession || null;
+    const activeFirstLastSession =
+      firstOccurrenceLastSession || plannedFirstLastSession || null;
+    const activeSeriesLastSession =
+      seriesLastSession || plannedSeriesLastSession || null;
+
+    const makeSchedulePayload = (scheduleFormValue, sessions) => ({
+      mode: scheduleFormValue.scheduleMode,
+      firstStartDate: scheduleFormValue.startDate,
+      firstEndDate: scheduleFormValue.endDate,
+      daysPerOccurrence: sessions.length,
+      defaultSessionStart: DEFAULT_SESSION_START,
+      defaultSessionEnd: DEFAULT_SESSION_END,
+      sessionTemplate: sessions.map((session) => ({
+        dayOffset: session.dayOffset,
+        startTime: session.startTime,
+        endTime: session.endTime,
+        durationMinutes: session.durationMinutes,
+      })),
+    });
+
+    const makeRecurrencePayload = (scheduleFormValue) => ({
+      scope: "period",
+      enabled: scheduleFormValue.scheduleMode === "recurring",
+      frequency:
+        scheduleFormValue.scheduleMode === "recurring" ? "weekly" : null,
+      interval:
+        scheduleFormValue.scheduleMode === "recurring"
+          ? Math.max(1, Number(scheduleFormValue.recurrenceInterval) || 1)
+          : null,
+      until:
+        scheduleFormValue.scheduleMode === "recurring" &&
+        scheduleFormValue.recurrenceUntil
+          ? new Date(`${scheduleFormValue.recurrenceUntil}T23:59:59`)
+          : null,
+    });
+
+    const plannedSchedulePayload = makeSchedulePayload(form, baseSessions);
+    const plannedRecurrencePayload = makeRecurrencePayload(form);
+
+    const resolvedFinalSchedulePayload =
+      activityType === "work_program"
+        ? hasSelectedProposal
+          ? makeSchedulePayload(finalScheduleForm, finalBaseSessions)
+          : null
+        : makeSchedulePayload(form, baseSessions);
+
+    const resolvedFinalRecurrencePayload =
+      activityType === "work_program"
+        ? hasSelectedProposal
+          ? makeRecurrencePayload(finalScheduleForm)
+          : null
+        : makeRecurrencePayload(form);
+
+    const effectiveSchedulePayload =
+      resolvedFinalSchedulePayload || plannedSchedulePayload;
+    const effectiveRecurrencePayload =
+      resolvedFinalRecurrencePayload || plannedRecurrencePayload;
 
     setSaving(true);
     setError("");
 
+    let createdActivity = null;
+    let committedChildRefs = [];
+    let proposalLinked = false;
+
     try {
-      await addDoc("Kegiatan", {
+      // ID Kegiatan yang dibaca manusia / digunakan pada UI, laporan, dan demo.
+      // Relasi antar-document tetap menggunakan Firestore Auto ID.
+      const referenceYear =
+        Number(String(form.startDate || "").slice(0, 4)) ||
+        new Date().getFullYear();
+
+      const referenceId = await generateActivityReferenceId(activityType, {
+        year: referenceYear,
+      });
+
+      createdActivity = await addDoc("Kegiatan", {
+        referenceId,
         title,
         description: form.description.trim(),
         activityType,
-        startAt: new Date(form.startAt),
-        endAt: form.endAt ? new Date(form.endAt) : null,
         location,
+        periodId: periodId || null,
+
+        // Field kompatibilitas lama memakai jadwal efektif:
+        // final jika sudah difinalisasi, rencana jika masih planned.
+        startAt: activeFirstSession?.startAt || null,
+        endAt: activeFirstLastSession?.endAt || null,
+        seriesEndAt: activeSeriesLastSession?.endAt || null,
+        calendarDayCount: effectiveBaseSessions.length,
+        occurrenceCount: occurrences.length,
+        attendanceSessionCount: totalSessionCount,
+        durationMinutes:
+          shouldFinalizeWorkProgram
+            ? finalTotalScheduledMinutes
+            : totalScheduledMinutes,
+
+        // Source of truth baru.
+        plannedSchedule:
+          activityType === "work_program" ? plannedSchedulePayload : null,
+        plannedRecurrence:
+          activityType === "work_program" ? plannedRecurrencePayload : null,
+        plannedOccurrenceCount:
+          activityType === "work_program" ? plannedOccurrences.length : null,
+        plannedAttendanceSessionCount:
+          activityType === "work_program" ? plannedTotalSessionCount : null,
+
+        finalSchedule: resolvedFinalSchedulePayload,
+        finalRecurrence: resolvedFinalRecurrencePayload,
+        scheduleStatus:
+          activityType === "work_program"
+            ? hasSelectedProposal
+              ? "finalized"
+              : "planned"
+            : "finalized",
+        scheduleFinalizedFrom:
+          activityType === "work_program" && hasSelectedProposal
+            ? form.finalScheduleSource
+            : activityType === "meeting"
+              ? "direct"
+              : null,
+        scheduleFinalizedAt:
+          activityType === "work_program" && hasSelectedProposal
+            ? serverTimestamp()
+            : activityType === "meeting"
+              ? serverTimestamp()
+              : null,
+
+        // Kompatibilitas query/tampilan lama.
+        schedule: effectiveSchedulePayload,
+        recurrence: effectiveRecurrencePayload,
+
         divisionId: form.divisionId || null,
         organiserMemberId: form.organiserMemberId || null,
-        participantCount: 0,
-        participantCapacity: form.participantCapacity
-          ? Number(form.participantCapacity)
-          : null,
+        committeeMemberIds:
+          activityType === "work_program" ? form.committeeMemberIds : [],
+
         proposalId:
+          activityType === "work_program" ? form.proposalId || null : null,
+        proposalStatus:
           activityType === "work_program"
-            ? form.proposalId || null
+            ? selectedProposal?.status || (hasSelectedProposal ? "submitted" : "not_submitted")
             : null,
-        status: "draft",
+
+        // Snapshot jadwal yang diajukan anggota jika Proposal sudah menyimpan
+        // data jadwal terstruktur. PDF tetap menjadi dokumen pendukung.
+        proposalScheduleSnapshot:
+          activityType === "work_program" && selectedProposal
+            ? proposalSchedule
+            : null,
+
+        teamStatus:
+          activityType === "work_program"
+            ? hasSelectedProposal
+              ? form.organiserMemberId || form.committeeMemberIds.length
+                ? "finalized_by_supervisor"
+                : "pending_finalization"
+              : "not_submitted"
+            : null,
+
+        status:
+          activityType === "work_program"
+            ? hasSelectedProposal
+              ? "upcoming"
+              : "planned"
+            : "draft",
+
         reportStatus:
-          activityType === "work_program"
-            ? "not_started"
-            : null,
+          activityType === "work_program" ? "not_started" : null,
+
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
 
+      const childWrites = [];
+
+      // Program Kerja tanpa proposal berhenti di level Kegiatan + rencana.
+      // PelaksanaanKegiatan dan SesiAbsensi baru lahir setelah jadwal final.
+      if (shouldGenerateChildren) {
+        for (const occurrence of occurrences) {
+          const first = occurrence.sessions[0];
+          const last = occurrence.sessions[occurrence.sessions.length - 1];
+          const pelaksanaanRef = doc(collection(db, "PelaksanaanKegiatan"));
+
+          childWrites.push({
+            ref: pelaksanaanRef,
+            data: {
+              activityId: createdActivity.id,
+              periodId: periodId || null,
+              occurrenceIndex: occurrence.occurrenceIndex,
+              startDate: occurrence.startDate,
+              endDate: occurrence.endDate,
+              startAt: first?.startAt || null,
+              endAt: last?.endAt || null,
+              sessionCount: occurrence.sessions.length,
+              status: "planned",
+              cancelledAt: null,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            },
+          });
+
+          for (const session of occurrence.sessions) {
+            const sesiRef = doc(collection(db, "SesiAbsensi"));
+
+            childWrites.push({
+              ref: sesiRef,
+              data: {
+                activityId: createdActivity.id,
+                pelaksanaanId: pelaksanaanRef.id,
+                periodId: periodId || null,
+                occurrenceIndex: occurrence.occurrenceIndex,
+                sessionIndex: session.sessionIndex,
+                date: session.date,
+                startAt: session.startAt,
+                endAt: session.endAt,
+                durationMinutes: session.durationMinutes,
+                status: "scheduled",
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              },
+            });
+          }
+        }
+      }
+
+      if (childWrites.length) {
+        committedChildRefs = await commitSetChunks(db, childWrites);
+      }
+
+      if (activityType === "work_program" && selectedProposal) {
+        await updateDoc("Proposal", selectedProposal.id, {
+          activityId: createdActivity.id,
+          updatedAt: serverTimestamp(),
+        });
+        proposalLinked = true;
+      }
+
       onCreated?.(activityType);
     } catch (submitError) {
       console.error("CREATE ACTIVITY ERROR:", submitError);
+
+      if (proposalLinked && selectedProposal) {
+        await updateDoc("Proposal", selectedProposal.id, {
+          activityId: null,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+      }
+
+      if (committedChildRefs.length) {
+        await deleteRefsInChunks(db, [...committedChildRefs].reverse());
+      }
+
+      if (createdActivity?.id) {
+        await deleteDoc("Kegiatan", createdActivity.id).catch(() => {});
+      }
+
       setError(
         submitError?.message ||
-          "Kegiatan belum berhasil disimpan. Coba lagi."
+          "Kegiatan belum berhasil disimpan. Data parsial sudah dicoba dibersihkan."
       );
     } finally {
       setSaving(false);
@@ -194,11 +1390,13 @@ export default function SeleksiKegiatanModal({
 
   return (
     <section
-      className={`w-full overflow-hidden rounded-3xl border border-border bg-card shadow-2xl transition-[max-width] duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] ${
-        step === "select" ? "max-w-xl" : "max-w-4xl"
+      className={`flex w-full flex-col overflow-hidden rounded-3xl border border-border bg-card shadow-2xl transition-[max-width] duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+        step === "select"
+          ? "max-h-[calc(100dvh-2rem)] max-w-xl"
+          : "h-[calc(100dvh-2rem)] max-h-[860px] max-w-5xl"
       }`}
     >
-      <header className="flex items-start justify-between gap-4 border-b border-border bg-card/95 px-5 py-5 backdrop-blur sm:px-6">
+      <header className="flex shrink-0 items-start justify-between gap-4 border-b border-border bg-card/95 px-5 py-5 backdrop-blur sm:px-6">
         <div className="min-w-0">
           <p className="text-xs font-bold uppercase tracking-[0.16em] text-primary">
             Tambah Kegiatan
@@ -208,14 +1406,20 @@ export default function SeleksiKegiatanModal({
             {step === "select"
               ? "Pilih Kategori Kegiatan"
               : activityType === "work_program"
-                ? "Tambah Program Kerja"
+                ? proposalPanelOpen
+                  ? "Pilih Proposal"
+                  : "Tambah Program Kerja"
                 : "Tambah Meeting"}
           </h2>
 
           <p className="mt-2 text-sm leading-6 text-text-muted">
             {step === "select"
               ? "Tentukan jenis kegiatan yang ingin dibuat."
-              : "Lengkapi informasi kegiatan. Data akan disimpan sebagai draf."}
+              : activityType === "work_program"
+                ? proposalPanelOpen
+                  ? "Pilih proposal yang sudah diunggah anggota dan belum terhubung ke kegiatan lain."
+                  : "Buat rencana kegiatan dan hubungkan proposal jika sudah tersedia."
+                : "Lengkapi informasi agenda meeting."}
           </p>
         </div>
 
@@ -229,9 +1433,9 @@ export default function SeleksiKegiatanModal({
         </button>
       </header>
 
-      <div className="max-h-[calc(100dvh-10rem)] overflow-y-auto">
+      <div className="min-h-0 flex-1 overflow-hidden">
         {step === "select" ? (
-          <div className="kegiatan-stage grid grid-cols-2 gap-4 p-5 sm:gap-5 sm:p-6">
+          <div className="kegiatan-stage h-full overflow-y-auto overscroll-contain p-5 sm:p-6"><div className="grid grid-cols-2 gap-4 sm:gap-5">
             {CATEGORY_OPTIONS.map((option, index) => (
               <button
                 key={option.value}
@@ -253,222 +1457,1106 @@ export default function SeleksiKegiatanModal({
                 </span>
               </button>
             ))}
+            </div>
           </div>
         ) : (
-          <form
-            onSubmit={submitForm}
-            className="kegiatan-stage p-5 sm:p-6"
-          >
-            <div className="mb-6">
-              <div className="inline-flex w-full rounded-2xl bg-input p-1 sm:w-auto">
-                <TypeTab
-                  active={activityType === "work_program"}
-                  icon="campaign"
-                  label="Program Kerja"
-                  onClick={() => changeType("work_program")}
-                />
-                <TypeTab
-                  active={activityType === "meeting"}
-                  icon="groups"
-                  label="Meeting"
-                  onClick={() => changeType("meeting")}
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
-              <FormField
-                className="sm:col-span-2"
-                label="Nama kegiatan"
-                required
+          <form onSubmit={submitForm} className="h-full min-h-0">
+            <div className="h-full min-h-0 overflow-hidden">
+              <div
+                className={`flex h-full min-h-0 w-[200%] items-stretch transition-transform duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+                  proposalPanelOpen ? "-translate-x-1/2" : "translate-x-0"
+                }`}
               >
-                <input
-                  type="text"
-                  value={form.title}
-                  onChange={updateField("title")}
-                  placeholder={
-                    activityType === "work_program"
-                      ? "Contoh: Class Meeting 2026"
-                      : "Contoh: Meeting Persiapan Class Meeting"
-                  }
-                  className={inputClass}
-                />
-              </FormField>
-
-              <FormField
-                className="sm:col-span-2"
-                label="Deskripsi"
-              >
-                <textarea
-                  value={form.description}
-                  onChange={updateField("description")}
-                  placeholder="Tuliskan tujuan atau gambaran singkat kegiatan"
-                  rows={4}
-                  className={`${inputClass} resize-y py-3`}
-                />
-              </FormField>
-
-              <FormField label="Waktu mulai" required>
-                <input
-                  type="datetime-local"
-                  value={form.startAt}
-                  onChange={updateField("startAt")}
-                  className={inputClass}
-                />
-              </FormField>
-
-              <FormField label="Waktu selesai">
-                <input
-                  type="datetime-local"
-                  value={form.endAt}
-                  onChange={updateField("endAt")}
-                  className={inputClass}
-                />
-              </FormField>
-
-              <FormField label="Lokasi" required>
-                <input
-                  type="text"
-                  value={form.location}
-                  onChange={updateField("location")}
-                  placeholder="Ruang OSIS atau Aula Sekolah"
-                  className={inputClass}
-                />
-              </FormField>
-
-              <FormField label="Kapasitas peserta">
-                <input
-                  type="number"
-                  min="0"
-                  value={form.participantCapacity}
-                  onChange={updateField("participantCapacity")}
-                  placeholder="Contoh: 100"
-                  className={inputClass}
-                />
-              </FormField>
-
-              <FormField label="Divisi / Sekbid">
-                <select
-                  value={form.divisionId}
-                  onChange={updateField("divisionId")}
-                  className={inputClass}
+                <div
+                  className={`h-full min-h-0 w-1/2 shrink-0 overflow-y-auto overscroll-contain p-5 transition-opacity duration-300 [scrollbar-gutter:stable] sm:p-6 ${
+                    proposalPanelOpen ? "pointer-events-none opacity-50" : "opacity-100"
+                  }`}
+                  aria-hidden={proposalPanelOpen}
                 >
-                  <option value="">Pengurus Inti / belum ditentukan</option>
-                  {divisions.map((division) => (
-                    <option key={division.id} value={division.id}>
-                      {division.code
-                        ? `Sekbid ${division.code} - `
-                        : ""}
-                      {division.shortName || division.name || "Tanpa nama"}
-                    </option>
-                  ))}
-                </select>
-              </FormField>
-
-              <FormField label="Penanggung jawab">
-                <select
-                  value={form.organiserMemberId}
-                  onChange={updateField("organiserMemberId")}
-                  className={inputClass}
-                >
-                  <option value="">Belum ditentukan</option>
-                  {officialMembers.map((member) => (
-                    <option key={member.id} value={member.id}>
-                      {member.fullName || "Anggota tanpa nama"}
-                      {member.organisationPosition
-                        ? ` — ${member.organisationPosition}`
-                        : ""}
-                    </option>
-                  ))}
-                </select>
-              </FormField>
-            </div>
-
-            <div
-              className={`grid transition-[grid-template-rows,opacity,margin] duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] ${
-                activityType === "work_program"
-                  ? "mt-6 grid-rows-[1fr] opacity-100"
-                  : "mt-0 grid-rows-[0fr] opacity-0"
-              }`}
-              aria-hidden={activityType !== "work_program"}
-            >
-              <div className="overflow-hidden">
-                <div className="rounded-2xl border border-primary/20 bg-primary/5 p-4 sm:p-5">
-                  <div className="mb-3 flex items-center gap-3">
-                    <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
-                      <AppIcon name="receipt" size={20} />
-                    </span>
-                    <div>
-                      <h3 className="font-bold text-text">
-                        Proposal Terkait
-                      </h3>
-                      <p className="mt-0.5 text-xs text-text-muted">
-                        Pilih proposal untuk Program Kerja ini.
-                      </p>
+                  <div className="mb-6">
+                    <div className="inline-flex w-full rounded-2xl bg-input p-1 sm:w-auto">
+                      <TypeTab
+                        active={activityType === "work_program"}
+                        icon="campaign"
+                        label="Program Kerja"
+                        onClick={() => changeType("work_program")}
+                      />
+                      <TypeTab
+                        active={activityType === "meeting"}
+                        icon="groups"
+                        label="Meeting"
+                        onClick={() => changeType("meeting")}
+                      />
                     </div>
                   </div>
 
-                  <select
-                    value={form.proposalId}
-                    onChange={updateField("proposalId")}
-                    tabIndex={activityType === "work_program" ? 0 : -1}
-                    className={inputClass}
-                  >
-                    <option value="">Belum memilih proposal</option>
-                    {proposalOptions.map((proposal) => (
-                      <option key={proposal.id} value={proposal.id}>
-                        {proposal.activity?.title ||
-                          proposal.title ||
-                          proposal.fileName ||
-                          "Proposal tanpa judul"}
-                        {proposal.status
-                          ? ` — ${proposal.status}`
-                          : ""}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                    <FormField className="sm:col-span-2" label="Nama kegiatan" required>
+                      <input
+                        type="text"
+                        value={form.title}
+                        onChange={updateField("title")}
+                        placeholder={
+                          activityType === "work_program"
+                            ? "Contoh: Class Meeting 2026"
+                            : "Contoh: Meeting Persiapan Class Meeting"
+                        }
+                        className={inputClass}
+                      />
+                    </FormField>
 
-                  {!proposalOptions.length && (
-                    <p className="mt-3 text-xs leading-5 text-text-muted">
-                      Belum ada proposal yang dapat dipilih.
-                    </p>
+                    <FormField className="sm:col-span-2" label="Deskripsi">
+                      <textarea
+                        value={form.description}
+                        onChange={updateField("description")}
+                        placeholder="Tuliskan tujuan atau gambaran singkat kegiatan"
+                        rows={4}
+                        className={`${inputClass} resize-y py-3`}
+                      />
+                    </FormField>
+
+                    <FormField className="sm:col-span-2" label="Divisi / Sekbid">
+                      <select
+                        value={form.divisionId}
+                        onChange={updateField("divisionId")}
+                        className={inputClass}
+                      >
+                        <option value="">Pengurus Inti / belum ditentukan</option>
+                        {divisions.map((division) => (
+                          <option key={division.id} value={division.id}>
+                            {division.code ? `Sekbid ${division.code} - ` : ""}
+                            {division.shortName || division.name || "Tanpa nama"}
+                          </option>
+                        ))}
+                      </select>
+                    </FormField>
+
+                    <FormField className="sm:col-span-2" label="Lokasi" required>
+                      <input
+                        type="text"
+                        value={form.location}
+                        onChange={updateField("location")}
+                        placeholder="Ruang OSIS atau Aula Sekolah"
+                        className={inputClass}
+                      />
+                    </FormField>
+                  </div>
+
+                  <ProgressiveSection open={Boolean(form.location.trim())}>
+                    <div className="mt-6 border-t border-border pt-6">
+                      <div className="mb-4">
+                        <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">
+                          Pola Pelaksanaan
+                        </p>
+                        <p className="mt-1 text-sm leading-6 text-text-muted">
+                          Pilih satu kali atau berulang. Tanggal pertama selalu menjadi template blok pelaksanaan dan setiap harinya menjadi satu sesi absensi.
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <RecurrenceChoice
+                          active={form.scheduleMode === "once"}
+                          icon="event_available"
+                          title="Sekali"
+                          description="Satu blok pelaksanaan"
+                          onClick={() => setScheduleMode("once")}
+                        />
+                        <RecurrenceChoice
+                          active={form.scheduleMode === "recurring"}
+                          icon="calendar_month"
+                          title="Berulang"
+                          description="Blok diulang dalam periode"
+                          onClick={() => setScheduleMode("recurring")}
+                        />
+                      </div>
+
+                      <div className="mt-6">
+                        <div className="mb-4">
+                          <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">
+                            {activityType === "work_program"
+                              ? form.scheduleMode === "recurring"
+                                ? "Rencana Pelaksanaan Pertama"
+                                : "Rencana Pelaksanaan"
+                              : form.scheduleMode === "recurring"
+                                ? "Pelaksanaan Pertama"
+                                : "Rentang Pelaksanaan"}
+                          </p>
+                          <p className="mt-1 text-sm text-text-muted">
+                            {activityType === "work_program"
+                              ? "Jadwal ini adalah rencana awal hasil pleno dan menjadi dasar reminder proposal. Setiap tanggal tetap dapat diatur jamnya."
+                              : "Setiap tanggal di dalam rentang akan otomatis dibuat dengan jam default 08:00–12:00 dan tetap dapat diedit."}
+                          </p>
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                          <ScheduleCard title="Mulai" tone="primary">
+                            <FormField label="Tanggal mulai" required>
+                              <input
+                                type="date"
+                                value={form.startDate}
+                                onChange={updateStartDate}
+                                className={inputClass}
+                              />
+                            </FormField>
+                          </ScheduleCard>
+
+                          <ScheduleCard title="Selesai">
+                            <FormField label="Tanggal selesai" required>
+                              <input
+                                type="date"
+                                min={form.startDate || undefined}
+                                value={form.endDate}
+                                onChange={updateEndDate}
+                                className={inputClass}
+                              />
+                            </FormField>
+                          </ScheduleCard>
+                        </div>
+
+                        <div
+                          className={`mt-4 flex flex-col gap-2 rounded-2xl border px-4 py-3 sm:flex-row sm:items-center sm:justify-between ${
+                            hasValidDateRange
+                              ? "border-primary/20 bg-primary/5"
+                              : "border-border bg-surface"
+                          }`}
+                        >
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
+                              Deteksi otomatis
+                            </p>
+                            <p className="mt-1 text-base font-bold text-text">
+                              {dayCount
+                                ? activityType === "work_program"
+                                  ? `${dayCount} hari · ${dayCount} calon sesi absensi`
+                                  : `${dayCount} hari · ${dayCount} sesi absensi`
+                                : "0 hari"}
+                            </p>
+                          </div>
+                          <p className="text-xs text-text-muted">
+                            {dayCount
+                              ? "Tanggal awal dan akhir bersifat inklusif."
+                              : "Lengkapi tanggal mulai dan selesai."}
+                          </p>
+                        </div>
+                      </div>
+
+                      <ProgressiveSection open={hasValidDateRange}>
+                        <div className="mt-6 border-t border-border pt-6">
+                          <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                            <div>
+                              <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">
+                                {activityType === "work_program"
+                                  ? "Rencana Harian"
+                                  : "Pelaksanaan Harian & Sesi Absensi"}
+                              </p>
+                              <p className="mt-1 text-sm leading-6 text-text-muted">
+                                {activityType === "work_program"
+                                  ? "Jam dibuat otomatis 08:00–12:00. Rencana ini belum membuat unit absensi sebelum jadwal difinalisasi."
+                                  : "Jam dibuat otomatis 08:00–12:00. Ubah per tanggal jika jadwal berbeda."}
+                              </p>
+                            </div>
+                            <span
+                              className={`w-fit rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-wider ${
+                                hasValidAttendanceSchedule
+                                  ? "bg-primary/10 text-primary"
+                                  : "bg-error-bg text-error-text"
+                              }`}
+                            >
+                              {validSessionCount}/{dayCount} valid
+                            </span>
+                          </div>
+
+                          <div className="max-h-80 space-y-3 overflow-y-auto rounded-2xl border border-border bg-surface p-3 overscroll-contain [scrollbar-gutter:stable] sm:p-4">
+                            {baseSessions.map((session) => {
+                              const hasCompleteTime = Boolean(session.startTime && session.endTime);
+                              const invalid = hasCompleteTime && !session.valid;
+
+                              return (
+                                <div
+                                  key={session.date}
+                                  className={`rounded-2xl border bg-card p-4 transition ${
+                                    invalid ? "border-error-text/40" : "border-border"
+                                  }`}
+                                >
+                                  <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_160px_160px] md:items-end">
+                                    <div className="min-w-0">
+                                      <p className="text-[10px] font-bold uppercase tracking-wider text-primary">
+                                        {activityType === "work_program"
+                                          ? `Rencana Hari ${session.dayOffset + 1}`
+                                          : `Pelaksanaan Hari ${session.dayOffset + 1}`}
+                                      </p>
+                                      <p className="mt-1 text-sm font-bold text-text">
+                                        {formatDateOnly(session.date)}
+                                      </p>
+                                      <p className="mt-1 text-xs text-text-muted">
+                                        Sesi absensi {session.valid ? `· ${formatDuration(session.durationMinutes)}` : "· belum valid"}
+                                      </p>
+                                    </div>
+
+                                    <FormField label="Mulai" required>
+                                      <input
+                                        type="time"
+                                        value={session.startTime}
+                                        onChange={updateDailySchedule(session.date, "startTime")}
+                                        className={`${inputClass} ${invalid ? "border-error-text focus:border-error-text" : ""}`}
+                                      />
+                                    </FormField>
+
+                                    <FormField label="Selesai" required>
+                                      <input
+                                        type="time"
+                                        value={session.endTime}
+                                        onChange={updateDailySchedule(session.date, "endTime")}
+                                        className={`${inputClass} ${invalid ? "border-error-text focus:border-error-text" : ""}`}
+                                      />
+                                    </FormField>
+                                  </div>
+
+                                  {invalid && (
+                                    <p className="mt-3 rounded-xl bg-error-bg px-3 py-2 text-xs font-semibold text-error-text">
+                                      Jam selesai harus lebih akhir dari jam mulai.
+                                    </p>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          {form.scheduleMode === "recurring" && (
+                            <div className="mt-6 rounded-2xl border border-border bg-surface p-4 sm:p-5">
+                              <div className="mb-4">
+                                <p className="text-sm font-bold text-text">Pengulangan</p>
+                                <p className="mt-1 text-xs leading-5 text-text-muted">
+                                  Seluruh blok pelaksanaan di atas akan diulang dengan interval mingguan sampai batas tanggal yang ditentukan.
+                                </p>
+                              </div>
+
+                              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                                <FormField label="Ulangi setiap">
+                                  <div className="relative">
+                                    <input
+                                      type="number"
+                                      min="1"
+                                      max="52"
+                                      value={form.recurrenceInterval}
+                                      onChange={updateField("recurrenceInterval")}
+                                      className={`${inputClass} pr-20`}
+                                    />
+                                    <span className="pointer-events-none absolute inset-y-0 right-4 flex items-center text-xs font-semibold text-text-muted">
+                                      minggu
+                                    </span>
+                                  </div>
+                                </FormField>
+
+                                <FormField label="Berulang sampai" required>
+                                  <input
+                                    type="date"
+                                    min={form.endDate || form.startDate || undefined}
+                                    max={periodEndDate || undefined}
+                                    value={form.recurrenceUntil}
+                                    onChange={updateField("recurrenceUntil")}
+                                    className={inputClass}
+                                  />
+                                </FormField>
+                              </div>
+
+                              <p className="mt-3 rounded-xl bg-card px-3 py-2 text-xs leading-5 text-text-muted">
+                                Seluruh blok pelaksanaan akan diulang setiap {Math.max(1, Number(form.recurrenceInterval) || 1)} minggu. Batas “Berulang sampai” adalah tanggal akhir absolut, sehingga blok terakhir hanya dibuat jika seluruh sesinya selesai paling lambat pada tanggal tersebut.
+                              </p>
+
+                              {periodEndDate && (
+                                <p className="mt-2 text-xs text-text-muted">
+                                  Batas maksimal mengikuti akhir periode aktif: {periodEndDate}.
+                                </p>
+                              )}
+                            </div>
+                          )}
+
+                          {hasValidAttendanceSchedule && occurrencePreview.length > 0 && (
+                            <div className="mt-5 rounded-2xl border border-border bg-card p-4 sm:p-5">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <p className="text-sm font-bold text-text">
+                                    {activityType === "work_program"
+                                      ? "Preview Rencana"
+                                      : "Preview Pelaksanaan"}
+                                  </p>
+                                  <p className="mt-1 text-xs text-text-muted">
+                                    {form.scheduleMode === "recurring"
+                                      ? `${occurrencePreview.length} pelaksanaan terdeteksi sampai batas pengulangan.`
+                                      : "Satu blok pelaksanaan akan dibuat."}
+                                  </p>
+                                </div>
+                                <span className="rounded-full bg-primary/10 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-primary">
+                                  {form.scheduleMode === "recurring" ? "Series" : "Sekali"}
+                                </span>
+                              </div>
+
+                              <div className="mt-4 grid max-h-96 grid-cols-1 gap-3 overflow-y-auto overscroll-contain pr-1 [scrollbar-gutter:stable] sm:grid-cols-2">
+                                {occurrencePreview.map((occurrence, index) => (
+                                  <div
+                                    key={`${occurrence.startDate}-${index}`}
+                                    className="rounded-xl border border-border bg-surface px-3 py-3"
+                                  >
+                                    <p className="text-[10px] font-bold uppercase tracking-wider text-primary">
+                                      {form.scheduleMode === "recurring"
+                                        ? `Minggu ${index + 1}`
+                                        : `Pelaksanaan ${index + 1}`}
+                                    </p>
+                                    <p className="mt-1 text-xs font-semibold text-text">
+                                      {occurrence.startDate === occurrence.endDate
+                                        ? formatDateOnly(occurrence.startDate)
+                                        : `${formatDateOnly(occurrence.startDate)} - ${formatDateOnly(occurrence.endDate)}`}
+                                    </p>
+                                    <p className="mt-1 text-[11px] text-text-muted">
+                                      {occurrence.sessions.length} {activityType === "work_program" ? "calon sesi absensi" : "sesi absensi"}
+                                    </p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </ProgressiveSection>
+                    </div>
+                  </ProgressiveSection>
+
+                          {activityType === "work_program" && (
+                            <div className="mt-6 rounded-2xl border border-primary/20 bg-primary/5 p-4 sm:p-5">
+                              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                                <div className="flex min-w-0 items-start gap-3">
+                                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                                    <AppIcon name="receipt" size={20} />
+                                  </span>
+                                  <div className="min-w-0">
+                                    <h3 className="font-bold text-text">Pengajuan Pelaksanaan</h3>
+                                    {selectedProposal ? (
+                                      <>
+                                        <p className="mt-1 truncate text-sm font-semibold text-text">
+                                          {proposalTitle(selectedProposal)}
+                                        </p>
+                                        <p className="mt-1 text-xs text-text-muted">
+                                          Proposal sudah dipilih. Bandingkan jadwal pengajuan dengan rencana awal sebelum menetapkan jadwal final.
+                                        </p>
+                                      </>
+                                    ) : (
+                                      <p className="mt-1 text-sm leading-6 text-text-muted">
+                                        Pilih proposal bila sudah tersedia. Tanpa proposal, Program Kerja tetap dapat disimpan sebagai Terencana dan rencana waktunya dipakai sebagai dasar reminder.
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="flex shrink-0 gap-2">
+                                  {selectedProposal && (
+                                    <button
+                                      type="button"
+                                      onClick={clearProposal}
+                                      className="inline-flex min-h-10 items-center justify-center rounded-xl border border-border bg-card px-3 text-xs font-semibold text-text-muted transition hover:border-error-text/30 hover:text-error-text"
+                                    >
+                                      Hapus
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() => setProposalPanelOpen(true)}
+                                    className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-xs font-semibold text-white shadow-sm transition hover:bg-primary-hover"
+                                  >
+                                    <AppIcon name={selectedProposal ? "edit" : "add"} size={17} />
+                                    {selectedProposal ? "Ganti Proposal" : "Masukkan Proposal"}
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+
+                          {activityType === "work_program" && (
+                            <ProgressiveSection open={hasSelectedProposal}>
+                              <div className="mt-6 border-t border-border pt-6">
+                                <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                  <div>
+                                    <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">
+                                      Finalisasi Jadwal Pembina
+                                    </p>
+                                    <p className="mt-1 max-w-3xl text-sm leading-6 text-text-muted">
+                                      Rencana dari pleno tetap disimpan sebagai histori dan dasar reminder. PelaksanaanKegiatan serta SesiAbsensi baru dibuat dari jadwal final ini.
+                                    </p>
+                                  </div>
+                                  <span className="w-fit rounded-full bg-primary/10 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-primary">
+                                    {form.finalScheduleSource === "proposal"
+                                      ? "Dari Pengajuan"
+                                      : form.finalScheduleSource === "manual"
+                                        ? "Diedit Pembina"
+                                        : "Dari Rencana"}
+                                  </span>
+                                </div>
+
+                                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                                  <div className="rounded-2xl border border-border bg-surface p-4">
+                                    <div className="flex items-center justify-between gap-3">
+                                      <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
+                                        Rencana dari Pleno
+                                      </p>
+                                      <span className="rounded-full bg-card px-2.5 py-1 text-[10px] font-bold text-text-muted">
+                                        Reminder
+                                      </span>
+                                    </div>
+                                    <p className="mt-2 text-sm font-bold leading-6 text-text">
+                                      {scheduleSummary(form, baseSessions)}
+                                    </p>
+                                    <button
+                                      type="button"
+                                      onClick={() => applyScheduleToFinal("planned")}
+                                      className="mt-4 inline-flex min-h-9 items-center justify-center gap-2 rounded-xl border border-border bg-card px-3 text-xs font-semibold text-text-muted transition hover:border-primary/40 hover:text-primary"
+                                    >
+                                      <AppIcon name="check" size={16} />
+                                      Gunakan Rencana Awal
+                                    </button>
+                                  </div>
+
+                                  <div
+                                    className={`rounded-2xl border p-4 ${
+                                      proposalScheduleIsDifferent
+                                        ? "border-amber-400/40 bg-amber-50/40"
+                                        : "border-border bg-surface"
+                                    }`}
+                                  >
+                                    <div className="flex items-center justify-between gap-3">
+                                      <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
+                                        Jadwal dari Pengajuan
+                                      </p>
+                                      {proposalSchedule ? (
+                                        <span
+                                          className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${
+                                            proposalScheduleIsDifferent
+                                              ? "bg-amber-100 text-amber-700"
+                                              : "bg-primary/10 text-primary"
+                                          }`}
+                                        >
+                                          {proposalScheduleIsDifferent ? "Berbeda" : "Sesuai"}
+                                        </span>
+                                      ) : (
+                                        <span className="rounded-full bg-input px-2.5 py-1 text-[10px] font-bold text-text-muted">
+                                          Belum terstruktur
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    <p className="mt-2 text-sm font-bold leading-6 text-text">
+                                      {proposalSchedule
+                                        ? scheduleSummary(
+                                            proposalSchedule,
+                                            proposalBaseSessions
+                                          )
+                                        : "Proposal belum memiliki field jadwal pengajuan yang dapat dibandingkan otomatis."}
+                                    </p>
+
+                                    {proposalSchedule ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => applyScheduleToFinal("proposal")}
+                                        className="mt-4 inline-flex min-h-9 items-center justify-center gap-2 rounded-xl border border-primary/30 bg-primary/5 px-3 text-xs font-semibold text-primary transition hover:bg-primary/10"
+                                      >
+                                        <AppIcon name="schedule" size={16} />
+                                        Gunakan Jadwal Pengajuan
+                                      </button>
+                                    ) : (
+                                      <p className="mt-3 text-xs leading-5 text-text-muted">
+                                        PDF tetap dapat dipakai sebagai dokumen pendukung. Untuk perbandingan otomatis, dashboard pengirim nantinya perlu menyimpan tanggal pengajuan sebagai field terstruktur.
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+
+                                {proposalScheduleIsDifferent && (
+                                  <div className="mt-4 rounded-2xl border border-amber-400/30 bg-amber-50 px-4 py-3">
+                                    <p className="text-xs font-bold text-amber-800">
+                                      Jadwal pengajuan berbeda dengan rencana awal.
+                                    </p>
+                                    <p className="mt-1 text-xs leading-5 text-amber-700">
+                                      Pembina dapat mempertahankan rencana awal, memakai jadwal pengajuan, atau mengedit jadwal final secara manual.
+                                    </p>
+                                  </div>
+                                )}
+
+                                <div className="mt-6 rounded-2xl border border-primary/20 bg-primary/5 p-4 sm:p-5">
+                                  <div className="mb-4">
+                                    <p className="text-sm font-bold text-text">
+                                      Jadwal Final
+                                    </p>
+                                    <p className="mt-1 text-xs leading-5 text-text-muted">
+                                      Jadwal ini menjadi source of truth untuk PelaksanaanKegiatan dan SesiAbsensi.
+                                    </p>
+                                  </div>
+
+                                  <div className="grid grid-cols-2 gap-3">
+                                    <RecurrenceChoice
+                                      active={form.finalScheduleMode === "once"}
+                                      icon="event_available"
+                                      title="Sekali"
+                                      description="Satu blok pelaksanaan final"
+                                      onClick={() => setFinalScheduleMode("once")}
+                                    />
+                                    <RecurrenceChoice
+                                      active={form.finalScheduleMode === "recurring"}
+                                      icon="calendar_month"
+                                      title="Berulang"
+                                      description="Blok final diulang mingguan"
+                                      onClick={() => setFinalScheduleMode("recurring")}
+                                    />
+                                  </div>
+
+                                  <div className="mt-5 grid grid-cols-1 gap-4 lg:grid-cols-2">
+                                    <ScheduleCard title="Mulai Final" tone="primary">
+                                      <FormField label="Tanggal mulai" required>
+                                        <input
+                                          type="date"
+                                          value={form.finalStartDate}
+                                          onChange={updateFinalStartDate}
+                                          className={inputClass}
+                                        />
+                                      </FormField>
+                                    </ScheduleCard>
+
+                                    <ScheduleCard title="Selesai Final">
+                                      <FormField label="Tanggal selesai" required>
+                                        <input
+                                          type="date"
+                                          min={form.finalStartDate || undefined}
+                                          value={form.finalEndDate}
+                                          onChange={updateFinalEndDate}
+                                          className={inputClass}
+                                        />
+                                      </FormField>
+                                    </ScheduleCard>
+                                  </div>
+
+                                  <div
+                                    className={`mt-4 flex flex-col gap-2 rounded-2xl border px-4 py-3 sm:flex-row sm:items-center sm:justify-between ${
+                                      hasValidFinalDateRange
+                                        ? "border-primary/20 bg-card"
+                                        : "border-border bg-surface"
+                                    }`}
+                                  >
+                                    <div>
+                                      <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
+                                        Jadwal Final Terdeteksi
+                                      </p>
+                                      <p className="mt-1 text-base font-bold text-text">
+                                        {finalDayCount
+                                          ? `${finalDayCount} hari · ${finalDayCount} sesi absensi per pelaksanaan`
+                                          : "0 hari"}
+                                      </p>
+                                    </div>
+                                    <span
+                                      className={`w-fit rounded-full px-3 py-1 text-[10px] font-bold uppercase tracking-wider ${
+                                        hasValidFinalAttendanceSchedule
+                                          ? "bg-primary/10 text-primary"
+                                          : "bg-error-bg text-error-text"
+                                      }`}
+                                    >
+                                      {finalValidSessionCount}/{finalDayCount} valid
+                                    </span>
+                                  </div>
+
+                                  {hasValidFinalDateRange && (
+                                    <div className="mt-4 max-h-80 space-y-3 overflow-y-auto rounded-2xl border border-border bg-surface p-3 overscroll-contain [scrollbar-gutter:stable] sm:p-4">
+                                      {finalBaseSessions.map((session) => {
+                                        const hasCompleteTime = Boolean(
+                                          session.startTime && session.endTime
+                                        );
+                                        const invalid =
+                                          hasCompleteTime && !session.valid;
+
+                                        return (
+                                          <div
+                                            key={session.date}
+                                            className={`rounded-2xl border bg-card p-4 transition ${
+                                              invalid
+                                                ? "border-error-text/40"
+                                                : "border-border"
+                                            }`}
+                                          >
+                                            <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_160px_160px] md:items-end">
+                                              <div className="min-w-0">
+                                                <p className="text-[10px] font-bold uppercase tracking-wider text-primary">
+                                                  Sesi Final {session.dayOffset + 1}
+                                                </p>
+                                                <p className="mt-1 text-sm font-bold text-text">
+                                                  {formatDateOnly(session.date)}
+                                                </p>
+                                                <p className="mt-1 text-xs text-text-muted">
+                                                  {session.valid
+                                                    ? formatDuration(
+                                                        session.durationMinutes
+                                                      )
+                                                    : "Jam belum valid"}
+                                                </p>
+                                              </div>
+
+                                              <FormField label="Mulai" required>
+                                                <input
+                                                  type="time"
+                                                  value={session.startTime}
+                                                  onChange={updateFinalDailySchedule(
+                                                    session.date,
+                                                    "startTime"
+                                                  )}
+                                                  className={`${inputClass} ${
+                                                    invalid
+                                                      ? "border-error-text focus:border-error-text"
+                                                      : ""
+                                                  }`}
+                                                />
+                                              </FormField>
+
+                                              <FormField label="Selesai" required>
+                                                <input
+                                                  type="time"
+                                                  value={session.endTime}
+                                                  onChange={updateFinalDailySchedule(
+                                                    session.date,
+                                                    "endTime"
+                                                  )}
+                                                  className={`${inputClass} ${
+                                                    invalid
+                                                      ? "border-error-text focus:border-error-text"
+                                                      : ""
+                                                  }`}
+                                                />
+                                              </FormField>
+                                            </div>
+
+                                            {invalid && (
+                                              <p className="mt-3 rounded-xl bg-error-bg px-3 py-2 text-xs font-semibold text-error-text">
+                                                Jam selesai harus lebih akhir dari jam mulai.
+                                              </p>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+
+                                  {form.finalScheduleMode === "recurring" && (
+                                    <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                                      <FormField label="Ulangi setiap">
+                                        <div className="relative">
+                                          <input
+                                            type="number"
+                                            min="1"
+                                            max="52"
+                                            value={form.finalRecurrenceInterval}
+                                            onChange={updateFinalField(
+                                              "finalRecurrenceInterval"
+                                            )}
+                                            className={`${inputClass} pr-20`}
+                                          />
+                                          <span className="pointer-events-none absolute inset-y-0 right-4 flex items-center text-xs font-semibold text-text-muted">
+                                            minggu
+                                          </span>
+                                        </div>
+                                      </FormField>
+
+                                      <FormField label="Berulang sampai" required>
+                                        <input
+                                          type="date"
+                                          min={
+                                            form.finalEndDate ||
+                                            form.finalStartDate ||
+                                            undefined
+                                          }
+                                          max={periodEndDate || undefined}
+                                          value={form.finalRecurrenceUntil}
+                                          onChange={updateFinalField(
+                                            "finalRecurrenceUntil"
+                                          )}
+                                          className={inputClass}
+                                        />
+                                      </FormField>
+                                    </div>
+                                  )}
+
+                                  {hasValidFinalAttendanceSchedule &&
+                                    finalOccurrencePreview.length > 0 && (
+                                      <div className="mt-5 rounded-2xl border border-border bg-card p-4">
+                                        <div className="flex items-center justify-between gap-3">
+                                          <div>
+                                            <p className="text-sm font-bold text-text">
+                                              Preview Jadwal Final
+                                            </p>
+                                            <p className="mt-1 text-xs text-text-muted">
+                                              {form.finalScheduleMode ===
+                                              "recurring"
+                                                ? `${finalOccurrencePreview.length} pelaksanaan final terdeteksi.`
+                                                : "Satu pelaksanaan final akan dibuat."}
+                                            </p>
+                                          </div>
+                                          <span className="rounded-full bg-primary px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-white">
+                                            Final
+                                          </span>
+                                        </div>
+
+                                        <div className="mt-4 grid max-h-96 grid-cols-1 gap-3 overflow-y-auto overscroll-contain pr-1 [scrollbar-gutter:stable] sm:grid-cols-2">
+                                          {finalOccurrencePreview.map(
+                                            (occurrence, index) => (
+                                              <div
+                                                key={`${occurrence.startDate}-final-${index}`}
+                                                className="rounded-xl border border-border bg-surface px-3 py-3"
+                                              >
+                                                <p className="text-[10px] font-bold uppercase tracking-wider text-primary">
+                                                  {form.finalScheduleMode ===
+                                                  "recurring"
+                                                    ? `Minggu ${index + 1}`
+                                                    : `Pelaksanaan ${index + 1}`}
+                                                </p>
+                                                <p className="mt-1 text-xs font-semibold text-text">
+                                                  {occurrence.startDate ===
+                                                  occurrence.endDate
+                                                    ? formatDateOnly(
+                                                        occurrence.startDate
+                                                      )
+                                                    : `${formatDateOnly(
+                                                        occurrence.startDate
+                                                      )} - ${formatDateOnly(
+                                                        occurrence.endDate
+                                                      )}`}
+                                                </p>
+                                                <p className="mt-1 text-[11px] text-text-muted">
+                                                  {occurrence.sessions.length} sesi absensi
+                                                </p>
+                                              </div>
+                                            )
+                                          )}
+                                        </div>
+                                      </div>
+                                    )}
+                                </div>
+                              </div>
+                            </ProgressiveSection>
+                          )}
+
+                          {activityType === "meeting" && (
+                            <div className="mt-6">
+                              <FormField label="Penanggung Jawab">
+                                <select
+                                  value={form.organiserMemberId}
+                                  onChange={updateField("organiserMemberId")}
+                                  className={inputClass}
+                                >
+                                  <option value="">Belum ditentukan</option>
+                                  {officialMembers.map((member) => (
+                                    <option key={member.id} value={member.id}>
+                                      {member.fullName || member.name || "Anggota tanpa nama"}
+                                      {member.organisationPosition || member.position
+                                        ? ` — ${member.organisationPosition || member.position}`
+                                        : ""}
+                                    </option>
+                                  ))}
+                                </select>
+                              </FormField>
+                            </div>
+                          )}
+
+                          {activityType === "work_program" && (
+                            <ProgressiveSection open={hasSelectedProposal}>
+                              <div className="mt-6 border-t border-border pt-6">
+                                <div className="mb-5">
+                                  <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">
+                                    Struktur Final Pembina
+                                  </p>
+                                  <p className="mt-1 text-sm leading-6 text-text-muted">
+                                    Proposal dan struktur berada di level program/series; tidak perlu ditentukan ulang untuk setiap occurrence.
+                                  </p>
+                                </div>
+
+                                <div className="mb-5 rounded-2xl border border-border bg-surface p-4">
+                                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                    <div>
+                                      <p className="text-sm font-bold text-text">
+                                        Usulan Kepanitiaan
+                                      </p>
+                                      <p className="mt-1 text-xs leading-5 text-text-muted">
+                                        Data ini bersifat rekomendatif dari pengirim. Pembina tetap menentukan struktur final.
+                                      </p>
+                                    </div>
+
+                                    {proposedCommittee.mode === "proposed" && (
+                                      <button
+                                        type="button"
+                                        onClick={applyProposedCommittee}
+                                        className="inline-flex min-h-9 shrink-0 items-center justify-center gap-2 rounded-xl border border-primary/30 bg-primary/5 px-3 text-xs font-semibold text-primary transition hover:bg-primary/10"
+                                      >
+                                        <AppIcon name="groups" size={16} />
+                                        Terapkan Usulan
+                                      </button>
+                                    )}
+                                  </div>
+
+                                  {proposedCommittee.mode === "supervisor_decides" ? (
+                                    <div className="mt-4 rounded-xl bg-card px-3 py-3 text-xs leading-5 text-text-muted">
+                                      Pengirim menyerahkan penentuan kepanitiaan sepenuhnya kepada Pembina.
+                                    </div>
+                                  ) : proposedCommittee.mode === "proposed" ? (
+                                    <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                      <ProposalMeta
+                                        label="Ketua / PJ Diusulkan"
+                                        value={
+                                          memberMap.get(
+                                            String(
+                                              proposedCommittee.organiserMemberId
+                                            )
+                                          )?.fullName ||
+                                          memberMap.get(
+                                            String(
+                                              proposedCommittee.organiserMemberId
+                                            )
+                                          )?.name ||
+                                          proposedCommittee.organiserMemberId ||
+                                          "Belum diusulkan"
+                                        }
+                                      />
+                                      <ProposalMeta
+                                        label="Jumlah Panitia"
+                                        value={`${proposedCommittee.memberIds.length} anggota`}
+                                      />
+                                    </div>
+                                  ) : (
+                                    <div className="mt-4 rounded-xl bg-card px-3 py-3 text-xs leading-5 text-text-muted">
+                                      Pengajuan ini belum memiliki data usulan kepanitiaan terstruktur. Pembina dapat menetapkan struktur secara manual.
+                                    </div>
+                                  )}
+                                </div>
+
+                                <FormField label="Ketua Pelaksana / PJ">
+                                  <select
+                                    value={form.organiserMemberId}
+                                    onChange={updateField("organiserMemberId")}
+                                    className={inputClass}
+                                  >
+                                    <option value="">Belum ditentukan</option>
+                                    {officialMembers.map((member) => (
+                                      <option key={member.id} value={member.id}>
+                                        {member.fullName || member.name || "Anggota tanpa nama"}
+                                        {member.organisationPosition || member.position
+                                          ? ` — ${member.organisationPosition || member.position}`
+                                          : " — Unknown"}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </FormField>
+
+                                <div className="mt-5">
+                                  <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                                    <div>
+                                      <p className="text-sm font-semibold text-text">List Panitia yang Terlibat</p>
+                                      <p className="mt-1 text-xs text-text-muted">
+                                        {form.committeeMemberIds.length} anggota dipilih.
+                                      </p>
+                                    </div>
+                                    <input
+                                      type="search"
+                                      value={committeeSearch}
+                                      onChange={(event) => setCommitteeSearch(event.target.value)}
+                                      placeholder="Cari anggota"
+                                      className={`${inputClass} sm:max-w-64`}
+                                    />
+                                  </div>
+
+                                  <div className="max-h-72 overflow-y-auto rounded-2xl border border-border bg-surface p-2 overscroll-contain">
+                                    {filteredCommitteeMembers.length ? (
+                                      filteredCommitteeMembers.map((member) => {
+                                        const checked = form.committeeMemberIds.includes(member.id);
+                                        const memberName = member.fullName || member.name || "Unknown";
+                                        const memberPosition =
+                                          member.organisationPosition || member.position || "Unknown";
+                                        return (
+                                          <label
+                                            key={member.id}
+                                            className={`flex cursor-pointer items-center gap-3 rounded-xl px-3 py-3 transition ${
+                                              checked ? "bg-primary/10" : "hover:bg-card"
+                                            }`}
+                                          >
+                                            <input
+                                              type="checkbox"
+                                              checked={checked}
+                                              onChange={() => toggleCommitteeMember(member.id)}
+                                              className="h-4 w-4 accent-primary"
+                                            />
+                                            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-card text-primary shadow-sm">
+                                              <AppIcon name="person" size={18} />
+                                            </span>
+                                            <span className="min-w-0 flex-1">
+                                              <span className="block truncate text-sm font-semibold text-text">
+                                                {memberName}
+                                              </span>
+                                              <span className="block truncate text-xs text-text-muted">
+                                                {memberPosition}
+                                              </span>
+                                            </span>
+                                          </label>
+                                        );
+                                      })
+                                    ) : (
+                                      <p className="px-3 py-6 text-center text-sm text-text-muted">
+                                        Anggota tidak ditemukan.
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            </ProgressiveSection>
+                          )}
+
+                  {error && (
+                    <div
+                      role="alert"
+                      className="mt-5 rounded-2xl border border-error-text/20 bg-error-bg px-4 py-3 text-sm text-error-text"
+                    >
+                      {error}
+                    </div>
                   )}
+
+                  <footer className="mt-7 flex flex-col-reverse gap-3 border-t border-border pt-5 sm:flex-row sm:items-center sm:justify-between">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStep("select");
+                        setProposalPanelOpen(false);
+                        setError("");
+                      }}
+                      disabled={saving}
+                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-border px-4 text-sm font-semibold text-text-muted transition duration-300 hover:border-primary/40 hover:bg-primary/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <AppIcon name="arrow_back" size={18} />
+                      Pilih ulang kategori
+                    </button>
+
+                    <button
+                      type="submit"
+                      disabled={
+                        saving ||
+                        !hasValidAttendanceSchedule ||
+                        (activityType === "work_program" &&
+                          hasSelectedProposal &&
+                          !hasValidFinalAttendanceSchedule)
+                      }
+                      className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-semibold text-white shadow-sm transition duration-300 ease-out hover:-translate-y-0.5 hover:bg-primary-hover hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0"
+                    >
+                      <AppIcon name="check" size={18} />
+                      {saving
+                        ? "Menyimpan..."
+                        : activityType === "work_program"
+                          ? hasSelectedProposal
+                            ? "Finalisasi & Simpan"
+                            : "Simpan sebagai Terencana"
+                          : "Simpan Meeting"}
+                    </button>
+                  </footer>
+                </div>
+
+                <div
+                  className={`flex h-full min-h-0 w-1/2 shrink-0 flex-col p-5 transition-opacity duration-300 sm:p-6 ${
+                    proposalPanelOpen ? "opacity-100" : "pointer-events-none opacity-40"
+                  }`}
+                  aria-hidden={!proposalPanelOpen}
+                >
+                  <div className="mb-5 flex items-center justify-between gap-4">
+                    <button
+                      type="button"
+                      onClick={() => setProposalPanelOpen(false)}
+                      className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-border bg-card px-3 text-sm font-semibold text-text-muted transition hover:border-primary/40 hover:text-primary"
+                    >
+                      <AppIcon name="arrow_back" size={18} />
+                      Kembali
+                    </button>
+
+                    <span className="rounded-full bg-primary/10 px-3 py-1 text-xs font-bold text-primary">
+                      {proposalOptions.length} proposal
+                    </span>
+                  </div>
+
+                  <div className="mb-4">
+                    <input
+                      type="search"
+                      value={proposalSearch}
+                      onChange={(event) => setProposalSearch(event.target.value)}
+                      placeholder="Cari proposal, pengunggah, jabatan, atau ID"
+                      className={inputClass}
+                    />
+                  </div>
+
+                  <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain pr-1 [scrollbar-gutter:stable]">
+                    {proposalOptions.length ? (
+                      proposalOptions.map((proposal) => {
+                        const uploader = resolveUploader(proposal, memberMap);
+                        const linked = Boolean(proposal.activityId);
+                        const selected = proposal.id === form.proposalId;
+
+                        return (
+                          <button
+                            key={proposal.id}
+                            type="button"
+                            disabled={linked}
+                            onClick={() => selectProposal(proposal)}
+                            className={`group w-full rounded-2xl border p-4 text-left transition duration-300 ease-out ${
+                              linked
+                                ? "cursor-not-allowed border-border bg-input opacity-55"
+                                : selected
+                                  ? "border-primary bg-primary/10 shadow-sm"
+                                  : "border-border bg-card hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-md"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-bold text-text">
+                                  {proposalTitle(proposal)}
+                                </p>
+                                <p className="mt-1 truncate text-xs text-text-muted">
+                                  {proposal.fileName || "File proposal tidak terdeteksi"}
+                                </p>
+                              </div>
+
+                              <span
+                                className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${
+                                  linked
+                                    ? "bg-input text-text-muted"
+                                    : selected
+                                      ? "bg-primary text-white"
+                                      : "bg-primary/10 text-primary"
+                                }`}
+                              >
+                                {linked ? "Terhubung" : selected ? "Dipilih" : proposal.status || "Unknown"}
+                              </span>
+                            </div>
+
+                            <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                              <ProposalMeta label="Pengunggah" value={uploader.name} />
+                              <ProposalMeta label="Jabatan" value={uploader.position} />
+                              <div className="sm:col-span-2">
+                                <ProposalMeta label="User ID" value={uploader.id} mono />
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="rounded-2xl border border-dashed border-border bg-surface px-5 py-10 text-center">
+                        <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                          <AppIcon name="receipt" size={23} />
+                        </span>
+                        <p className="mt-4 font-semibold text-text">
+                          Proposal tidak ditemukan
+                        </p>
+                        <p className="mt-1 text-sm text-text-muted">
+                          Belum ada proposal yang cocok dengan pencarian.
+                        </p>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
-
-            {error && (
-              <div
-                role="alert"
-                className="mt-5 rounded-2xl border border-error-text/20 bg-error-bg px-4 py-3 text-sm text-error-text"
-              >
-                {error}
-              </div>
-            )}
-
-            <footer className="mt-7 flex flex-col-reverse gap-3 border-t border-border pt-5 sm:flex-row sm:items-center sm:justify-between">
-              <button
-                type="button"
-                onClick={() => {
-                  setStep("select");
-                  setError("");
-                }}
-                disabled={saving}
-                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-border px-4 text-sm font-semibold text-text-muted transition duration-300 hover:border-primary/40 hover:bg-primary/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                <AppIcon name="arrow_back" size={18} />
-                Pilih ulang kategori
-              </button>
-
-              <button
-                type="submit"
-                disabled={saving}
-                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-semibold text-white shadow-sm transition duration-300 ease-out hover:-translate-y-0.5 hover:bg-primary-hover hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0"
-              >
-                <AppIcon name="check" size={18} />
-                {saving ? "Menyimpan..." : "Simpan sebagai Draf"}
-              </button>
-            </footer>
           </form>
         )}
       </div>
@@ -502,6 +2590,82 @@ export default function SeleksiKegiatanModal({
 
 const inputClass =
   "min-h-11 w-full rounded-xl border border-border bg-input px-4 text-sm text-text outline-none transition duration-300 placeholder:text-text-muted/70 focus:border-primary focus:bg-card focus:ring-2 focus:ring-primary/10";
+
+function ProgressiveSection({ open, children }) {
+  return (
+    <div
+      className={`grid transition-[grid-template-rows,opacity] duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+        open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"
+      }`}
+      aria-hidden={!open}
+    >
+      <div className="overflow-hidden">{children}</div>
+    </div>
+  );
+}
+
+function ProposalMeta({ label, value, mono = false }) {
+  return (
+    <div className="rounded-xl bg-surface px-3 py-2.5">
+      <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
+        {label}
+      </p>
+      <p
+        className={`mt-1 truncate text-xs font-semibold text-text ${
+          mono ? "font-mono" : ""
+        }`}
+      >
+        {value || "Unknown"}
+      </p>
+    </div>
+  );
+}
+
+function ScheduleCard({ title, tone = "neutral", children }) {
+  return (
+    <section
+      className={`rounded-2xl border p-4 sm:p-5 ${
+        tone === "primary"
+          ? "border-primary/20 bg-primary/5"
+          : "border-border bg-surface"
+      }`}
+    >
+      <div className="mb-4 flex items-center gap-2">
+        <span
+          className={`h-2.5 w-2.5 rounded-full ${
+            tone === "primary" ? "bg-primary" : "bg-text-muted/40"
+          }`}
+        />
+        <h3 className="text-sm font-bold text-text">{title}</h3>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function RecurrenceChoice({ active, icon, title, description, onClick }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-2xl border p-4 text-left transition duration-300 ${
+        active
+          ? "border-primary bg-primary/5 shadow-sm"
+          : "border-border bg-card hover:border-primary/30"
+      }`}
+    >
+      <span
+        className={`flex h-10 w-10 items-center justify-center rounded-xl ${
+          active ? "bg-primary text-white" : "bg-input text-text-muted"
+        }`}
+      >
+        <AppIcon name={icon} size={19} />
+      </span>
+      <p className="mt-3 text-sm font-bold text-text">{title}</p>
+      <p className="mt-1 text-xs leading-5 text-text-muted">{description}</p>
+    </button>
+  );
+}
 
 function TypeTab({ active, icon, label, onClick }) {
   return (
