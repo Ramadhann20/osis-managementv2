@@ -3,17 +3,21 @@
 import AppIcon from "@/components/global/AppIcon";
 import { formatDateTime } from "@/components/pembina/_shared/firestoreHelpers";
 import {
-  ActivityStatusBadge,
   DisabledAction,
   EmptyState,
   StatCard,
 } from "@/components/pembina/_shared/PembinaUi";
 import {
-  activityMatchesSearch,
   KegiatanFilterBar,
   KegiatanMeta,
-  organiserLabel,
+  BadgeStatus,
+  kegiatanCocokPencarian,
+  labelPenyelenggara,
 } from "./KegiatanSectionUi";
+import {
+  OPSI_STATUS_PROGRAM_KERJA,
+  STATUS_KEGIATAN,
+} from "../konfigurasiManajemenKegiatan";
 
 export default function ProgramKerjaSection({
   rows,
@@ -27,8 +31,8 @@ export default function ProgramKerjaSection({
 
   const filtered = rows.filter(
     (item) =>
-      activityMatchesSearch(item, keyword) &&
-      (statusFilter === "all" || item.status === statusFilter)
+      kegiatanCocokPencarian(item, keyword) &&
+      (statusFilter === "semua" || item.status === statusFilter)
   );
 
   return (
@@ -43,21 +47,21 @@ export default function ProgramKerjaSection({
         <StatCard
           icon="calendar_month"
           label="Akan Datang"
-          value={rows.filter((item) => item.status === "upcoming").length}
+          value={rows.filter((item) => item.status === STATUS_KEGIATAN.AKAN_DATANG).length}
           helper="Belum dimulai"
           accent="blue"
         />
         <StatCard
           icon="fact_check"
           label="Berlangsung"
-          value={rows.filter((item) => item.status === "ongoing").length}
+          value={rows.filter((item) => item.status === STATUS_KEGIATAN.BERLANGSUNG).length}
           helper="Sedang dilaksanakan"
           accent="amber"
         />
         <StatCard
           icon="check"
           label="Selesai"
-          value={rows.filter((item) => item.status === "completed").length}
+          value={rows.filter((item) => item.status === STATUS_KEGIATAN.SELESAI).length}
           helper="Sudah ditutup"
           accent="green"
         />
@@ -73,14 +77,8 @@ export default function ProgramKerjaSection({
         setSearch={setSearch}
         statusFilter={statusFilter}
         setStatusFilter={setStatusFilter}
-        searchPlaceholder="Cari program kerja"
-        options={[
-          ["draft", "Draf"],
-          ["upcoming", "Akan Datang"],
-          ["ongoing", "Berlangsung"],
-          ["completed", "Selesai"],
-          ["cancelled", "Dibatalkan"],
-        ]}
+        searchPlaceholder="Cari ID atau nama program kerja"
+        options={OPSI_STATUS_PROGRAM_KERJA}
       />
 
       {filtered.length ? (
@@ -97,15 +95,20 @@ export default function ProgramKerjaSection({
                       <span className="rounded-full bg-primary/10 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-primary">
                         Program Kerja
                       </span>
-                      <ActivityStatusBadge status={activity.status} />
+                      {activity.idReferensi && (
+                        <span className="rounded-full bg-input px-3 py-1 font-mono text-[10px] font-bold tracking-wider text-text-muted">
+                          {activity.idReferensi}
+                        </span>
+                      )}
+                      <BadgeStatus status={activity.status} />
                     </div>
 
                     <h2 className="mt-3 font-bold text-text">
-                      {activity.title || "Program kerja tanpa judul"}
+                      {activity.namaKegiatan || "Program kerja tanpa judul"}
                     </h2>
 
                     <p className="mt-2 max-h-12 overflow-hidden text-sm leading-6 text-text-muted">
-                      {activity.description || "Tidak ada deskripsi."}
+                      {activity.deskripsi || "Tidak ada deskripsi."}
                     </p>
                   </div>
 
@@ -123,34 +126,23 @@ export default function ProgramKerjaSection({
               <div className="grid grid-cols-1 gap-4 p-5 sm:grid-cols-2">
                 <KegiatanMeta
                   label="Waktu"
-                  value={formatDateTime(activity.startAt)}
+                  value={formatDateTime(activity.waktuMulai)}
                 />
-                <KegiatanMeta
-                  label="Lokasi"
-                  value={activity.location || "-"}
-                />
+                <KegiatanMeta label="Lokasi" value={activity.lokasi || "-"} />
                 <KegiatanMeta
                   label="Penyelenggara"
-                  value={organiserLabel(activity)}
+                  value={labelPenyelenggara(activity)}
                 />
                 <KegiatanMeta
                   label="Peserta"
-                  value={`${activity.participantCount || 0}/${
-                    activity.participantCapacity || "-"
-                  }`}
+                  value={`${activity.jumlahPeserta || 0}/${activity.kapasitasPeserta || "-"}`}
                 />
               </div>
 
               <div className="flex flex-wrap justify-end gap-2 border-t border-border bg-surface p-4">
-                <DisabledAction icon="visibility" variant="neutral">
-                  Detail
-                </DisabledAction>
-                <DisabledAction icon="edit" variant="outline">
-                  Edit
-                </DisabledAction>
-                <DisabledAction icon="block" variant="danger">
-                  Batalkan
-                </DisabledAction>
+                <DisabledAction icon="visibility" variant="neutral">Detail</DisabledAction>
+                <DisabledAction icon="edit" variant="outline">Edit</DisabledAction>
+                <DisabledAction icon="block" variant="danger">Batalkan</DisabledAction>
               </div>
             </article>
           ))}

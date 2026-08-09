@@ -4,11 +4,11 @@ import AppIcon from "@/components/global/AppIcon";
 import {
   Avatar,
   MemberStatusBadge,
-} from "@/components/pembina/_shared/PembinaUi";
+} from "../DataAnggotaUi";
 import {
   formatDate,
   percentage,
-} from "@/components/pembina/_shared/firestoreHelpers";
+} from "../dataAnggotaHelpers";
 import { useAnggotaDetailOverlay } from "./AnggotaDetailOverlay";
 
 function normalizeText(value) {
@@ -21,7 +21,7 @@ function normalizeText(value) {
 
 function isBoardDivision(division) {
   const divisionName = normalizeText(
-    division?.shortName || division?.name || division?.code
+    division?.namaSingkat || division?.nama || division?.kode
   );
 
   return [
@@ -85,8 +85,8 @@ function sekbidRoleRank(position) {
 
 export function isBadanPengurus(member) {
   return (
-    isBoardDivision(member?.division) ||
-    isCoreBoardPosition(member?.organisationPosition)
+    isBoardDivision(member?.divisi) ||
+    isCoreBoardPosition(member?.jabatanOrganisasi)
   );
 }
 
@@ -97,13 +97,13 @@ export function isBadanPengurusDivision(division) {
 export function sortBadanPengurus(items) {
   return [...items].sort((a, b) => {
     const rankDifference =
-      boardRoleRank(a?.organisationPosition) -
-      boardRoleRank(b?.organisationPosition);
+      boardRoleRank(a?.jabatanOrganisasi) -
+      boardRoleRank(b?.jabatanOrganisasi);
 
     if (rankDifference !== 0) return rankDifference;
 
-    return String(a?.fullName || "").localeCompare(
-      String(b?.fullName || ""),
+    return String(a?.namaLengkap || "").localeCompare(
+      String(b?.namaLengkap || ""),
       "id",
       { sensitivity: "base" }
     );
@@ -113,13 +113,13 @@ export function sortBadanPengurus(items) {
 export function sortSekbidMembers(items) {
   return [...items].sort((a, b) => {
     const rankDifference =
-      sekbidRoleRank(a?.organisationPosition) -
-      sekbidRoleRank(b?.organisationPosition);
+      sekbidRoleRank(a?.jabatanOrganisasi) -
+      sekbidRoleRank(b?.jabatanOrganisasi);
 
     if (rankDifference !== 0) return rankDifference;
 
-    return String(a?.fullName || "").localeCompare(
-      String(b?.fullName || ""),
+    return String(a?.namaLengkap || "").localeCompare(
+      String(b?.namaLengkap || ""),
       "id",
       { sensitivity: "base" }
     );
@@ -158,7 +158,7 @@ export default function BadanPengurusSection({ members = [] }) {
             key={member.id}
             role="button"
             tabIndex={0}
-            title={`Lihat detail ${member.fullName || "anggota"}`}
+            title={`Lihat detail ${member.namaLengkap || "anggota"}`}
             onClick={() => openAnggotaDetail(member)}
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {
@@ -173,14 +173,14 @@ export default function BadanPengurusSection({ members = [] }) {
             </span>
 
             <div className="flex items-center gap-3 pr-10">
-              <Avatar name={member.fullName} size="lg" />
+              <Avatar name={member.namaLengkap} size="lg" />
 
               <div className="min-w-0">
                 <p className="truncate font-bold text-text">
-                  {member.fullName || "-"}
+                  {member.namaLengkap || "-"}
                 </p>
                 <p className="mt-1 text-xs font-semibold text-primary">
-                  {member.organisationPosition || "Badan Pengurus"}
+                  {member.jabatanOrganisasi || "Badan Pengurus"}
                 </p>
               </div>
             </div>
@@ -196,7 +196,7 @@ export default function BadanPengurusSection({ members = [] }) {
               <div className="rounded-xl bg-input p-3">
                 <p className="text-text-muted">Kelas</p>
                 <p className="mt-1 truncate font-semibold text-text">
-                  {member.className || "-"}
+                  {member.namaKelas || "-"}
                 </p>
               </div>
             </div>
@@ -205,7 +205,7 @@ export default function BadanPengurusSection({ members = [] }) {
               <div className="flex items-center justify-between text-xs">
                 <span className="text-text-muted">Kehadiran</span>
                 <span className="font-bold text-text">
-                  {percentage(member.summary?.attendancePercentage)}%
+                  {percentage(member.ringkasan?.persentaseKehadiran)}%
                 </span>
               </div>
 
@@ -214,7 +214,7 @@ export default function BadanPengurusSection({ members = [] }) {
                   className="h-full rounded-full bg-primary"
                   style={{
                     width: `${percentage(
-                      member.summary?.attendancePercentage
+                      member.ringkasan?.persentaseKehadiran
                     )}%`,
                   }}
                 />
@@ -223,11 +223,11 @@ export default function BadanPengurusSection({ members = [] }) {
 
             <div className="mt-5 flex items-center justify-between gap-3">
               <p className="text-[11px] text-text-muted">
-                Bergabung {formatDate(member.joinedAt)}
+                Bergabung {formatDate(member.bergabungPada)}
               </p>
 
               <div className="flex items-center gap-2">
-                <MemberStatusBadge status={member.membershipStatus} />
+                <MemberStatusBadge status={member.statusKeanggotaan} />
                 <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl text-text-muted transition group-hover:translate-x-0.5 group-hover:bg-primary/10 group-hover:text-primary">
                   <AppIcon name="chevron_right" size={21} />
                 </span>

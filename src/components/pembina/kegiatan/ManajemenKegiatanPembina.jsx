@@ -20,90 +20,111 @@ import {
   PageError,
   PageHeading,
   PageLoading,
-  ProposalStatusBadge,
-  ReportStatusBadge,
   StatCard,
   Tabs,
 } from "@/components/pembina/_shared/PembinaUi";
 import ProgramKerjaSection from "./sub-components/ProgramKerjaSection";
 import RapatSection from "./sub-components/RapatSection";
+import { BadgeStatus } from "./sub-components/KegiatanSectionUi";
 import { useSeleksiKegiatanOverlay } from "./sub-components/SeleksiKegiatanOverlay";
+import {
+  FIELD,
+  JENIS_KEGIATAN,
+  KOLEKSI,
+  OPSI_STATUS_LAPORAN,
+  OPSI_STATUS_PROPOSAL,
+  STATUS_KEANGGOTAAN,
+  STATUS_LAPORAN,
+  STATUS_PROPOSAL,
+} from "./konfigurasiManajemenKegiatan";
 
 export default function ManajemenKegiatanPembina() {
   const { colRef } = useDb();
 
-  const activities = useCollection(() => colRef("Kegiatan"), [], {
+  // Semua nama collection dipusatkan di konfigurasi modul.
+  const kegiatan = useCollection(() => colRef(KOLEKSI.KEGIATAN), [], {
     enabled: true,
   });
-  const proposals = useCollection(() => colRef("Proposal"), [], {
+  const proposal = useCollection(() => colRef(KOLEKSI.PROPOSAL), [], {
     enabled: true,
   });
-  const members = useCollection(() => colRef("Anggota"), [], {
+  const anggota = useCollection(() => colRef(KOLEKSI.ANGGOTA), [], {
     enabled: true,
   });
-  const divisions = useCollection(() => colRef("Divisi"), [], {
+  const divisi = useCollection(() => colRef(KOLEKSI.DIVISI), [], {
     enabled: true,
   });
 
   const [tab, setTab] = useState("kegiatan");
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [activityType, setActivityType] = useState("work_program");
+  const [statusFilter, setStatusFilter] = useState("semua");
+  const [jenisKegiatan, setJenisKegiatan] = useState(JENIS_KEGIATAN.PROGRAM_KERJA);
 
-  const loading = isLoading(activities, proposals, members, divisions);
-  const error = firstError(activities, proposals, members, divisions);
+  const loading = isLoading(kegiatan, proposal, anggota, divisi);
+  const error = firstError(kegiatan, proposal, anggota, divisi);
 
   const data = useMemo(() => {
-    const activityRows = rowsOf(activities);
-    const proposalRows = rowsOf(proposals);
-    const memberRows = rowsOf(members);
-    const divisionRows = rowsOf(divisions);
+    const barisKegiatan = rowsOf(kegiatan);
+    const barisProposal = rowsOf(proposal);
+    const barisAnggota = rowsOf(anggota);
+    const barisDivisi = rowsOf(divisi);
 
-    const memberMap = new Map(
-      memberRows.map((item) => [item.id, item])
-    );
-    const divisionMap = new Map(
-      divisionRows.map((item) => [item.id, item])
-    );
-    const activityMap = new Map(
-      activityRows.map((item) => [item.id, item])
-    );
+    const petaAnggota = new Map(barisAnggota.map((item) => [item.id, item]));
+    const petaDivisi = new Map(barisDivisi.map((item) => [item.id, item]));
+    const petaKegiatan = new Map(barisKegiatan.map((item) => [item.id, item]));
 
     return {
-      memberRows: memberRows.filter((item) =>
-        ["active", "inactive", "suspended"].includes(item.membershipStatus)
+      barisAnggota: barisAnggota.filter((item) =>
+        [
+          STATUS_KEANGGOTAAN.AKTIF,
+          STATUS_KEANGGOTAAN.NONAKTIF,
+          STATUS_KEANGGOTAAN.DITANGGUHKAN,
+        ].includes(item[FIELD.ANGGOTA.STATUS_KEANGGOTAAN])
       ),
-      divisionRows,
-      activityRows: sortDateDesc(activityRows, "startAt").map((item) => ({
+
+      barisDivisi,
+
+      barisKegiatan: sortDateDesc(
+        barisKegiatan,
+        FIELD.KEGIATAN.WAKTU_MULAI
+      ).map((item) => ({
         ...item,
-        // Data lama tanpa activityType tetap dianggap sebagai Program Kerja.
-        activityType:
-          item.activityType === "meeting" ? "meeting" : "work_program",
-        division: divisionMap.get(item.divisionId) || null,
-        organiser: memberMap.get(item.organiserMemberId) || null,
+        // Data baru wajib memakai enum Indonesia. Jika kosong, dianggap Program Kerja.
+        jenisKegiatan:
+          item[FIELD.KEGIATAN.JENIS] === JENIS_KEGIATAN.RAPAT
+            ? JENIS_KEGIATAN.RAPAT
+            : JENIS_KEGIATAN.PROGRAM_KERJA,
+        divisi: petaDivisi.get(item[FIELD.KEGIATAN.ID_DIVISI]) || null,
+        penanggungJawab:
+          petaAnggota.get(item[FIELD.KEGIATAN.ID_PENANGGUNG_JAWAB]) || null,
       })),
-      proposalRows: sortDateDesc(proposalRows, "submittedAt").map(
-        (item) => ({
+
+      barisProposal: sortDateDesc(
+        barisProposal,
+        FIELD.PROPOSAL.DIAJUKAN_PADA
+      ).map((item) => {
+        const pengunggah =
+          petaAnggota.get(item[FIELD.PROPOSAL.ID_PENGUNGGAH]) || null;
+
+        return {
           ...item,
-          activity: activityMap.get(item.activityId) || null,
-          uploader: memberMap.get(item.uploadedBy) || null,
-          division:
-            divisionMap.get(memberMap.get(item.uploadedBy)?.divisionId) ||
-            null,
-        })
-      ),
+          kegiatan: petaKegiatan.get(item[FIELD.PROPOSAL.ID_KEGIATAN]) || null,
+          pengunggah,
+          divisi: petaDivisi.get(pengunggah?.[FIELD.ANGGOTA.ID_DIVISI]) || null,
+        };
+      }),
     };
-  }, [activities, proposals, members, divisions]);
+  }, [kegiatan, proposal, anggota, divisi]);
 
   const { openSeleksiKegiatan } = useSeleksiKegiatanOverlay({
-    proposals: data.proposalRows,
-    divisions: data.divisionRows,
-    members: data.memberRows,
+    proposals: data.barisProposal,
+    divisions: data.barisDivisi,
+    members: data.barisAnggota,
     onCreated: (selectedType) => {
       setTab("kegiatan");
-      setActivityType(selectedType);
+      setJenisKegiatan(selectedType);
       setSearch("");
-      setStatusFilter("all");
+      setStatusFilter("semua");
     },
   });
 
@@ -132,7 +153,7 @@ export default function ManajemenKegiatanPembina() {
         value={tab}
         onChange={(value) => {
           setTab(value);
-          setStatusFilter("all");
+          setStatusFilter("semua");
         }}
         items={[
           { value: "kegiatan", label: "Kegiatan" },
@@ -143,19 +164,19 @@ export default function ManajemenKegiatanPembina() {
 
       {tab === "kegiatan" && (
         <ActivitiesTab
-          rows={data.activityRows}
+          rows={data.barisKegiatan}
           search={search}
           setSearch={setSearch}
           statusFilter={statusFilter}
           setStatusFilter={setStatusFilter}
-          activityType={activityType}
-          setActivityType={setActivityType}
+          activityType={jenisKegiatan}
+          setActivityType={setJenisKegiatan}
         />
       )}
 
       {tab === "proposal" && (
         <ProposalsTab
-          rows={data.proposalRows}
+          rows={data.barisProposal}
           search={search}
           setSearch={setSearch}
           statusFilter={statusFilter}
@@ -165,7 +186,7 @@ export default function ManajemenKegiatanPembina() {
 
       {tab === "laporan" && (
         <ReportsTab
-          rows={data.activityRows}
+          rows={data.barisKegiatan}
           search={search}
           setSearch={setSearch}
           statusFilter={statusFilter}
@@ -186,16 +207,16 @@ function ActivitiesTab({
   setActivityType,
 }) {
   const workProgramRows = rows.filter(
-    (item) => item.activityType === "work_program"
+    (item) => item.jenisKegiatan === JENIS_KEGIATAN.PROGRAM_KERJA
   );
   const meetingRows = rows.filter(
-    (item) => item.activityType === "meeting"
+    (item) => item.jenisKegiatan === JENIS_KEGIATAN.RAPAT
   );
 
   const handleTypeChange = (value) => {
     setActivityType(value);
     setSearch("");
-    setStatusFilter("all");
+    setStatusFilter("semua");
   };
 
   const typeSelector = (
@@ -204,9 +225,7 @@ function ActivitiesTab({
         <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">
           Tipe Kegiatan
         </p>
-        <h2 className="mt-1 font-bold text-text">
-          Pilih Program Kerja atau Rapat
-        </h2>
+        <h2 className="mt-1 font-bold text-text">Pilih Program Kerja atau Rapat</h2>
         <p className="mt-1 text-xs leading-5 text-text-muted">
           Setiap tipe ditampilkan dan dikelola melalui komponen terpisah.
         </p>
@@ -217,11 +236,11 @@ function ActivitiesTab({
         onChange={handleTypeChange}
         items={[
           {
-            value: "work_program",
+            value: JENIS_KEGIATAN.PROGRAM_KERJA,
             label: `Program Kerja (${workProgramRows.length})`,
           },
           {
-            value: "meeting",
+            value: JENIS_KEGIATAN.RAPAT,
             label: `Rapat (${meetingRows.length})`,
           },
         ]}
@@ -231,7 +250,7 @@ function ActivitiesTab({
 
   return (
     <div className="mt-6">
-      {activityType === "work_program" && (
+      {activityType === JENIS_KEGIATAN.PROGRAM_KERJA && (
         <ProgramKerjaSection
           rows={workProgramRows}
           search={search}
@@ -242,7 +261,7 @@ function ActivitiesTab({
         />
       )}
 
-      {activityType === "meeting" && (
+      {activityType === JENIS_KEGIATAN.RAPAT && (
         <RapatSection
           rows={meetingRows}
           search={search}
@@ -256,56 +275,41 @@ function ActivitiesTab({
   );
 }
 
-function ProposalsTab({
-  rows,
-  search,
-  setSearch,
-  statusFilter,
-  setStatusFilter,
-}) {
+function ProposalsTab({ rows, search, setSearch, statusFilter, setStatusFilter }) {
   const keyword = search.trim().toLowerCase();
   const filtered = rows.filter((item) => {
     return (
       (!keyword ||
-        item.title?.toLowerCase().includes(keyword) ||
-        item.uploader?.fullName?.toLowerCase().includes(keyword) ||
-        item.activity?.title?.toLowerCase().includes(keyword)) &&
-      (statusFilter === "all" || item.status === statusFilter)
+        item.namaKegiatan?.toLowerCase().includes(keyword) ||
+        item.pengunggah?.namaLengkap?.toLowerCase().includes(keyword) ||
+        item.kegiatan?.namaKegiatan?.toLowerCase().includes(keyword) ||
+        item.kegiatan?.idReferensi?.toLowerCase().includes(keyword)) &&
+      (statusFilter === "semua" || item.status === statusFilter)
     );
   });
 
   return (
     <div className="mt-6">
       <section className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          icon="receipt"
-          label="Total Proposal"
-          value={rows.length}
-          helper="Seluruh proposal kegiatan"
-        />
+        <StatCard icon="receipt" label="Total Proposal" value={rows.length} helper="Seluruh proposal kegiatan" />
         <StatCard
           icon="calendar_month"
           label="Menunggu"
-          value={
-            rows.filter((item) => item.status === "pending_review").length
-          }
+          value={rows.filter((item) => item.status === STATUS_PROPOSAL.MENUNGGU_REVIEW).length}
           helper="Menunggu review"
           accent="amber"
         />
         <StatCard
           icon="verified"
           label="Disetujui"
-          value={rows.filter((item) => item.status === "approved").length}
+          value={rows.filter((item) => item.status === STATUS_PROPOSAL.DISETUJUI).length}
           helper="Sudah disetujui"
           accent="green"
         />
         <StatCard
           icon="edit"
           label="Perlu Revisi"
-          value={
-            rows.filter((item) => item.status === "revision_required")
-              .length
-          }
+          value={rows.filter((item) => item.status === STATUS_PROPOSAL.PERLU_REVISI).length}
           helper="Perlu diperbaiki"
           accent="red"
         />
@@ -318,13 +322,7 @@ function ProposalsTab({
         setSearch={setSearch}
         statusFilter={statusFilter}
         setStatusFilter={setStatusFilter}
-        options={[
-          ["draft", "Draf"],
-          ["pending_review", "Menunggu Review"],
-          ["revision_required", "Perlu Revisi"],
-          ["approved", "Disetujui"],
-          ["rejected", "Ditolak"],
-        ]}
+        options={OPSI_STATUS_PROPOSAL}
       />
 
       <section className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
@@ -346,22 +344,22 @@ function ProposalsTab({
                   <tr key={proposal.id}>
                     <td className="px-5 py-4">
                       <p className="text-sm font-semibold text-text">
-                        {proposal.activity?.title || proposal.title}
+                        {proposal.kegiatan?.namaKegiatan || proposal.namaKegiatan || "-"}
                       </p>
                       <p className="mt-1 text-xs text-text-muted">
-                        Versi {proposal.version || 1}
+                        Versi {proposal.versi || 1}
                       </p>
                     </td>
                     <td className="px-5 py-4">
                       <div className="flex items-center gap-3">
-                        <Avatar name={proposal.uploader?.fullName} size="sm" />
+                        <Avatar name={proposal.pengunggah?.namaLengkap} size="sm" />
                         <div>
                           <p className="text-sm font-semibold text-text">
-                            {proposal.uploader?.fullName || "-"}
+                            {proposal.pengunggah?.namaLengkap || "-"}
                           </p>
                           <p className="text-xs text-text-muted">
-                            {proposal.division
-                              ? `Sekbid ${proposal.division.code}`
+                            {proposal.divisi
+                              ? `Sekbid ${proposal.divisi.kode || "-"}`
                               : "Pengurus Inti"}
                           </p>
                         </div>
@@ -369,17 +367,17 @@ function ProposalsTab({
                     </td>
                     <td className="px-5 py-4">
                       <p className="max-w-48 truncate text-sm text-text">
-                        {proposal.fileName || "-"}
+                        {proposal.namaFile || "-"}
                       </p>
                       <p className="mt-1 text-xs text-text-muted">
-                        {formatBytes(proposal.fileSizeBytes)}
+                        {formatBytes(proposal.ukuranFileByte)}
                       </p>
                     </td>
                     <td className="px-5 py-4 text-sm text-text-muted">
-                      {formatDate(proposal.submittedAt)}
+                      {formatDate(proposal.diajukanPada)}
                     </td>
                     <td className="px-5 py-4 text-center">
-                      <ProposalStatusBadge status={proposal.status} />
+                      <BadgeStatus status={proposal.status} jenis="proposal" />
                     </td>
                     <td className="px-5 py-4">
                       <div className="flex justify-end gap-1">
@@ -404,54 +402,40 @@ function ProposalsTab({
   );
 }
 
-function ReportsTab({
-  rows,
-  search,
-  setSearch,
-  statusFilter,
-  setStatusFilter,
-}) {
+function ReportsTab({ rows, search, setSearch, statusFilter, setStatusFilter }) {
   const keyword = search.trim().toLowerCase();
   const filtered = rows.filter((item) => {
     return (
       (!keyword ||
-        item.title?.toLowerCase().includes(keyword) ||
-        item.location?.toLowerCase().includes(keyword)) &&
-      (statusFilter === "all" || item.reportStatus === statusFilter)
+        item.namaKegiatan?.toLowerCase().includes(keyword) ||
+        item.idReferensi?.toLowerCase().includes(keyword) ||
+        item.lokasi?.toLowerCase().includes(keyword)) &&
+      (statusFilter === "semua" || item.statusLaporan === statusFilter)
     );
   });
 
   return (
     <div className="mt-6">
       <section className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          icon="receipt"
-          label="Total Kegiatan"
-          value={rows.length}
-          helper="Kegiatan yang membutuhkan laporan"
-        />
+        <StatCard icon="receipt" label="Total Kegiatan" value={rows.length} helper="Kegiatan yang membutuhkan laporan" />
         <StatCard
           icon="calendar_month"
           label="Menunggu Laporan"
-          value={rows.filter((item) => item.reportStatus === "pending").length}
+          value={rows.filter((item) => item.statusLaporan === STATUS_LAPORAN.MENUNGGU).length}
           helper="Belum diselesaikan"
           accent="amber"
         />
         <StatCard
           icon="upload_file"
           label="Sudah Dikirim"
-          value={
-            rows.filter((item) => item.reportStatus === "submitted").length
-          }
+          value={rows.filter((item) => item.statusLaporan === STATUS_LAPORAN.DIAJUKAN).length}
           helper="Menunggu validasi"
           accent="blue"
         />
         <StatCard
           icon="check"
           label="Selesai"
-          value={
-            rows.filter((item) => item.reportStatus === "completed").length
-          }
+          value={rows.filter((item) => item.statusLaporan === STATUS_LAPORAN.SELESAI).length}
           helper="Laporan lengkap"
           accent="green"
         />
@@ -464,12 +448,7 @@ function ReportsTab({
         setSearch={setSearch}
         statusFilter={statusFilter}
         setStatusFilter={setStatusFilter}
-        options={[
-          ["not_started", "Belum Dimulai"],
-          ["pending", "Menunggu Laporan"],
-          ["submitted", "Sudah Dikirim"],
-          ["completed", "Selesai"],
-        ]}
+        options={OPSI_STATUS_LAPORAN}
       />
 
       <section className="grid grid-cols-1 gap-5 lg:grid-cols-2">
@@ -481,12 +460,15 @@ function ReportsTab({
             >
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <h2 className="font-bold text-text">{activity.title}</h2>
+                  <p className="font-mono text-[10px] font-bold text-primary">
+                    {activity.idReferensi || "-"}
+                  </p>
+                  <h2 className="mt-1 font-bold text-text">{activity.namaKegiatan}</h2>
                   <p className="mt-2 text-sm text-text-muted">
-                    {formatDate(activity.startAt)} · {activity.location}
+                    {formatDate(activity.waktuMulai)} · {activity.lokasi}
                   </p>
                 </div>
-                <ReportStatusBadge status={activity.reportStatus} />
+                <BadgeStatus status={activity.statusLaporan} jenis="laporan" />
               </div>
 
               <div className="mt-5 rounded-xl bg-surface p-4">
@@ -494,14 +476,12 @@ function ReportsTab({
                   File Laporan
                 </p>
                 <p className="mt-2 break-all text-sm font-semibold text-text">
-                  {activity.reportFileURL || "Belum ada file laporan"}
+                  {activity.urlFileLaporan || "Belum ada file laporan"}
                 </p>
               </div>
 
               <div className="mt-5 flex justify-end gap-2">
-                <DisabledAction icon="visibility" variant="outline">
-                  Lihat Laporan
-                </DisabledAction>
+                <DisabledAction icon="visibility" variant="outline">Lihat Laporan</DisabledAction>
                 <DisabledAction icon="check">Validasi</DisabledAction>
               </div>
             </article>
@@ -529,9 +509,7 @@ function FilterBar({
     <section className="my-6 flex flex-col gap-4 rounded-2xl border border-border bg-card p-5 shadow-sm lg:flex-row lg:items-center lg:justify-between">
       <div>
         <h2 className="font-bold text-text">{title}</h2>
-        <p className="mt-1 text-xs text-text-muted">
-          {count} data ditampilkan.
-        </p>
+        <p className="mt-1 text-xs text-text-muted">{count} data ditampilkan.</p>
       </div>
 
       <div className="flex flex-col gap-3 sm:flex-row">
@@ -546,11 +524,9 @@ function FilterBar({
           onChange={(event) => setStatusFilter(event.target.value)}
           className="min-h-11 rounded-xl border border-border bg-input px-4 text-sm outline-none focus:border-primary"
         >
-          <option value="all">Semua Status</option>
+          <option value="semua">Semua Status</option>
           {options.map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
+            <option key={value} value={value}>{label}</option>
           ))}
         </select>
       </div>
@@ -564,9 +540,7 @@ function IconAction({ icon, label, danger = false }) {
       type="button"
       disabled
       title={`${label} akan diaktifkan pada tahap berikutnya`}
-      className={`rounded-lg p-2 opacity-60 ${
-        danger ? "text-error-text" : "text-primary"
-      }`}
+      className={`rounded-lg p-2 opacity-60 ${danger ? "text-error-text" : "text-primary"}`}
     >
       <AppIcon name={icon} size={18} />
     </button>

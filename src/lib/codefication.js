@@ -1,44 +1,7 @@
 // src/lib/codefication.js
-// ============================================================
-// CENTRALIZED ID CODIFICATION
-// ============================================================
-//
-// File ini menjadi satu-satunya source of truth untuk:
-//
-// 1. Format ID administratif/reference ID.
-// 2. Prefix tiap entity.
-// 3. Sequence/nomor urut.
-// 4. Firestore atomic counter.
-// 5. Generator ID.
-// 6. Formatter ID turunan.
-// 7. Parser dan validator ID.
-//
-// PENTING:
-//
-// Firestore document.id / Auto ID tetap menjadi PRIMARY KEY
-// dan tetap digunakan untuk seluruh relasi database.
-//
-// Contoh:
-//
-// Firestore:
-// Kegiatan/x7Kjs92Ab...
-//
-// Data:
-// {
-//   referenceId: "PK-2026-001"
-// }
-//
-// Child:
-// {
-//   activityId: "x7Kjs92Ab..."
-// }
-//
-// Jadi:
-//
-// document.id  = ID teknis database
-// referenceId  = ID administratif yang dibaca manusia
-//
-// ============================================================
+// Source of truth ID referensi yang dibaca manusia.
+// Firestore document.id tetap menjadi primary key teknis
+// dan foreign key relasi.
 
 import {
   doc,
@@ -50,561 +13,378 @@ import { db } from "@/lib/firebase-config";
 
 
 // ============================================================
-// COLLECTION COUNTER
+// COLLECTION PENGHITUNG
 // ============================================================
 
-/**
- * Collection internal untuk menyimpan sequence.
- *
- * Contoh:
- *
- * SystemCounters
- * ├── PK_2026
- * │   current: 12
- * │
- * └── MT_2026
- *     current: 4
- */
-export const REFERENCE_ID_COUNTER_COLLECTION =
-  "SystemCounters";
+export const KOLEKSI_PENGHITUNG_ID =
+  "PenghitungSistem";
 
 
 // ============================================================
-// SCHEME / PREFIX
+// SKEMA ID REFERENSI
 // ============================================================
 
-/**
- * Semua format ID administratif didefinisikan di sini.
- *
- * Saat ini:
- *
- * Program Kerja
- * PK-2026-001
- *
- * Meeting
- * MT-2026-001
- *
- * Jika nanti ada entity baru, cukup tambahkan di sini.
- */
-export const REFERENCE_ID_SCHEMES = Object.freeze({
-  activity: Object.freeze({
-    work_program: Object.freeze({
-      prefix: "PK",
-      label: "Program Kerja",
+export const SKEMA_ID_REFERENSI =
+  Object.freeze({
+    kegiatan: Object.freeze({
+      program_kerja: Object.freeze({
+        awalan: "PK",
+        label: "Program Kerja",
+      }),
+
+      rapat: Object.freeze({
+        awalan: "MT",
+        label: "Rapat",
+      }),
     }),
-
-    meeting: Object.freeze({
-      prefix: "MT",
-      label: "Meeting",
-    }),
-  }),
-});
+  });
 
 
 // ============================================================
-// BASIC FORMATTER
+// NORMALISASI
 // ============================================================
 
-/**
- * Memastikan tahun valid.
- *
- * normalizeReferenceYear(2026)
- * -> 2026
- */
-export function normalizeReferenceYear(
-  value = new Date().getFullYear()
+export function normalisasiTahun(
+  nilai = new Date().getFullYear()
 ) {
-  const year = Number(value);
+  const tahun = Number(nilai);
 
   if (
-    !Number.isInteger(year) ||
-    year < 2000 ||
-    year > 9999
+    !Number.isInteger(tahun) ||
+    tahun < 2000 ||
+    tahun > 9999
   ) {
     throw new Error(
       "Tahun ID referensi tidak valid."
     );
   }
 
-  return year;
+  return tahun;
 }
 
 
-/**
- * Format nomor urut.
- *
- * 1   -> 001
- * 2   -> 002
- * 12  -> 012
- * 125 -> 125
- */
-export function formatReferenceSequence(
-  sequence,
-  length = 3
+// ============================================================
+// FORMAT NOMOR URUT
+// ============================================================
+
+export function formatNomorUrut(
+  nomorUrut,
+  panjang = 3
 ) {
-  const numericSequence = Number(sequence);
+  const nomor = Number(nomorUrut);
 
   if (
-    !Number.isInteger(numericSequence) ||
-    numericSequence < 1
+    !Number.isInteger(nomor) ||
+    nomor < 1
   ) {
     throw new Error(
       "Nomor urut ID referensi harus berupa bilangan bulat positif."
     );
   }
 
-  return String(numericSequence).padStart(
-    length,
+  return String(nomor).padStart(
+    panjang,
     "0"
   );
 }
 
 
-/**
- * Formatter generic.
- *
- * formatReferenceId({
- *   prefix: "PK",
- *   year: 2026,
- *   sequence: 1
- * })
- *
- * hasil:
- *
- * PK-2026-001
- */
-export function formatReferenceId({
-  prefix,
-  year,
-  sequence,
-  separator = "-",
-  sequenceLength = 3,
+// ============================================================
+// FORMAT ID REFERENSI
+// ============================================================
+
+export function formatIdReferensi({
+  awalan,
+  tahun,
+  nomorUrut,
+  pemisah = "-",
+  panjangNomor = 3,
 }) {
-  const normalizedPrefix = String(
-    prefix || ""
+  const awalanNormal = String(
+    awalan || ""
   )
     .trim()
     .toUpperCase();
 
-  if (!normalizedPrefix) {
+  if (!awalanNormal) {
     throw new Error(
-      "Prefix ID referensi wajib diisi."
+      "Awalan ID referensi wajib diisi."
     );
   }
-
-  const normalizedYear =
-    normalizeReferenceYear(year);
-
-  const formattedSequence =
-    formatReferenceSequence(
-      sequence,
-      sequenceLength
-    );
 
   return [
-    normalizedPrefix,
-    normalizedYear,
-    formattedSequence,
-  ].join(separator);
+    awalanNormal,
+    normalisasiTahun(tahun),
+    formatNomorUrut(
+      nomorUrut,
+      panjangNomor
+    ),
+  ].join(pemisah);
 }
 
 
 // ============================================================
-// ACTIVITY SCHEME
+// SKEMA KEGIATAN
 // ============================================================
 
-/**
- * Mengambil konfigurasi berdasarkan activityType.
- *
- * work_program
- * ->
- * {
- *   prefix: "PK",
- *   label: "Program Kerja"
- * }
- */
-export function getActivityReferenceIdScheme(
-  activityType
+export function ambilSkemaIdKegiatan(
+  jenisKegiatan
 ) {
-  const scheme =
-    REFERENCE_ID_SCHEMES.activity?.[
-      activityType
+  const skema =
+    SKEMA_ID_REFERENSI.kegiatan?.[
+      jenisKegiatan
     ];
 
-  if (!scheme) {
+  if (!skema) {
     throw new Error(
-      `ID referensi untuk activityType "${activityType}" belum terdaftar.`
+      `Skema ID untuk jenis kegiatan "${jenisKegiatan}" belum terdaftar.`
     );
   }
 
-  return scheme;
-}
-
-
-/**
- * Mendapat label berdasarkan activityType.
- *
- * work_program -> Program Kerja
- * meeting      -> Meeting
- */
-export function getActivityReferenceIdLabel(
-  activityType
-) {
-  return getActivityReferenceIdScheme(
-    activityType
-  ).label;
+  return skema;
 }
 
 
 // ============================================================
-// COUNTER KEY
+// KUNCI COUNTER
 // ============================================================
 
-/**
- * Membuat nama document counter.
- *
- * PK + 2026
- * -> PK_2026
- *
- * MT + 2026
- * -> MT_2026
- */
-export function buildReferenceCounterKey({
-  prefix,
-  year,
+export function buatKunciPenghitung({
+  awalan,
+  tahun,
 }) {
-  const normalizedPrefix = String(
-    prefix || ""
+  const awalanNormal = String(
+    awalan || ""
   )
     .trim()
     .toUpperCase();
 
-  if (!normalizedPrefix) {
+  if (!awalanNormal) {
     throw new Error(
-      "Prefix counter ID referensi wajib diisi."
+      "Awalan penghitung wajib diisi."
     );
   }
 
-  const normalizedYear =
-    normalizeReferenceYear(year);
-
-  return `${normalizedPrefix}_${normalizedYear}`;
+  return `${awalanNormal}_${normalisasiTahun(
+    tahun
+  )}`;
 }
 
 
 // ============================================================
-// ATOMIC SEQUENCE
+// ATOMIC COUNTER
 // ============================================================
 
-/**
- * Reserve nomor urut selanjutnya secara atomic.
- *
- * Menggunakan Firestore transaction supaya:
- *
- * User A -> PK-2026-001
- * User B -> PK-2026-002
- *
- * tidak mungkin keduanya memperoleh 001
- * pada waktu bersamaan.
- *
- *
- * Sequence TIDAK digunakan ulang.
- *
- * Contoh:
- *
- * PK-2026-001
- * PK-2026-002
- * PK-2026-003
- *
- * PK-2026-003 kemudian dihapus.
- *
- * ID berikutnya tetap:
- *
- * PK-2026-004
- *
- * bukan PK-2026-003.
- */
-export async function reserveNextReferenceSequence({
-  prefix,
-  year = new Date().getFullYear(),
+export async function ambilNomorUrutBerikutnya({
+  awalan,
+  tahun = new Date().getFullYear(),
 }) {
-  const normalizedPrefix = String(
-    prefix || ""
+  const awalanNormal = String(
+    awalan || ""
   )
     .trim()
     .toUpperCase();
 
-  const normalizedYear =
-    normalizeReferenceYear(year);
+  const tahunNormal =
+    normalisasiTahun(tahun);
 
-  if (!normalizedPrefix) {
+  if (!awalanNormal) {
     throw new Error(
-      "Prefix ID referensi wajib diisi."
+      "Awalan ID referensi wajib diisi."
     );
   }
 
-  const counterKey =
-    buildReferenceCounterKey({
-      prefix: normalizedPrefix,
-      year: normalizedYear,
+  const kunci =
+    buatKunciPenghitung({
+      awalan: awalanNormal,
+      tahun: tahunNormal,
     });
 
-  const counterRef = doc(
+  const refPenghitung = doc(
     db,
-    REFERENCE_ID_COUNTER_COLLECTION,
-    counterKey
+    KOLEKSI_PENGHITUNG_ID,
+    kunci
   );
 
   return runTransaction(
     db,
-    async (transaction) => {
+    async (transaksi) => {
       const snapshot =
-        await transaction.get(counterRef);
+        await transaksi.get(
+          refPenghitung
+        );
 
-      const current = snapshot.exists()
-        ? Number(
-            snapshot.data()?.current || 0
-          )
-        : 0;
+      const nomorTerakhir =
+        snapshot.exists()
+          ? Number(
+              snapshot.data()
+                ?.nomorTerakhir || 0
+            )
+          : 0;
 
-      const next = current + 1;
+      const nomorBerikutnya =
+        nomorTerakhir + 1;
 
-      transaction.set(
-        counterRef,
+      transaksi.set(
+        refPenghitung,
         {
-          prefix: normalizedPrefix,
-          year: normalizedYear,
+          awalan:
+            awalanNormal,
 
-          current: next,
+          tahun:
+            tahunNormal,
 
-          updatedAt: serverTimestamp(),
+          nomorTerakhir:
+            nomorBerikutnya,
+
+          diperbaruiPada:
+            serverTimestamp(),
 
           ...(snapshot.exists()
             ? {}
             : {
-                createdAt:
+                dibuatPada:
                   serverTimestamp(),
               }),
         },
+
         {
           merge: true,
         }
       );
 
-      return next;
+      return nomorBerikutnya;
     }
   );
 }
 
 
 // ============================================================
-// GENERIC ID GENERATOR
+// GENERATOR GENERIC
 // ============================================================
 
-/**
- * Generic generator.
- *
- * const id = await generateReferenceId({
- *   prefix: "PK",
- *   year: 2026
- * });
- *
- * hasil:
- *
- * PK-2026-001
- */
-export async function generateReferenceId({
-  prefix,
-  year = new Date().getFullYear(),
-  separator = "-",
-  sequenceLength = 3,
+export async function buatIdReferensi({
+  awalan,
+  tahun = new Date().getFullYear(),
+  pemisah = "-",
+  panjangNomor = 3,
 }) {
-  const normalizedYear =
-    normalizeReferenceYear(year);
+  const tahunNormal =
+    normalisasiTahun(tahun);
 
-  const sequence =
-    await reserveNextReferenceSequence({
-      prefix,
-      year: normalizedYear,
+  const nomorUrut =
+    await ambilNomorUrutBerikutnya({
+      awalan,
+      tahun: tahunNormal,
     });
 
-  return formatReferenceId({
-    prefix,
-    year: normalizedYear,
-    sequence,
-    separator,
-    sequenceLength,
+  return formatIdReferensi({
+    awalan,
+    tahun: tahunNormal,
+    nomorUrut,
+    pemisah,
+    panjangNomor,
   });
 }
 
 
 // ============================================================
-// ACTIVITY ID GENERATOR
+// GENERATOR ID KEGIATAN
 // ============================================================
 
-/**
- * Generator khusus Kegiatan.
- *
- *
- * PROGRAM KERJA
- *
- * await generateActivityReferenceId(
- *   "work_program",
- *   { year: 2026 }
- * );
- *
- * ->
- *
- * PK-2026-001
- *
- *
- * MEETING
- *
- * await generateActivityReferenceId(
- *   "meeting",
- *   { year: 2026 }
- * );
- *
- * ->
- *
- * MT-2026-001
- */
-export async function generateActivityReferenceId(
-  activityType,
+export async function buatIdReferensiKegiatan(
+  jenisKegiatan,
   {
-    year = new Date().getFullYear(),
+    tahun = new Date().getFullYear(),
   } = {}
 ) {
-  const scheme =
-    getActivityReferenceIdScheme(
-      activityType
+  const skema =
+    ambilSkemaIdKegiatan(
+      jenisKegiatan
     );
 
-  return generateReferenceId({
-    prefix: scheme.prefix,
-    year,
+  return buatIdReferensi({
+    awalan: skema.awalan,
+    tahun,
   });
 }
 
 
 // ============================================================
-// CHILD ID FORMATTER
-// ============================================================
-//
-// Untuk sekarang helper ini OPTIONAL.
-//
-// PelaksanaanKegiatan dan SesiAbsensi
-// TIDAK WAJIB menyimpan referenceId.
-//
-// Firestore Auto ID tetap cukup.
-//
-// Tetapi kalau suatu saat dibutuhkan untuk:
-// - laporan,
-// - debugging,
-// - export,
-// - tampilan administrator,
-//
-// formatter sudah tersedia.
+// FORMAT ID TURUNAN PELAKSANAAN
 // ============================================================
 
-
-/**
- * Format ID Pelaksanaan.
- *
- * activityReferenceId:
- * PK-2026-001
- *
- * occurrenceIndex:
- * 0
- *
- * hasil:
- *
- * PK-2026-001-P01
- */
-export function formatExecutionReferenceId(
-  activityReferenceId,
-  occurrenceIndex
+export function formatIdReferensiPelaksanaan(
+  idReferensiKegiatan,
+  indeksPelaksanaan
 ) {
-  const base = String(
-    activityReferenceId || ""
+  const dasar = String(
+    idReferensiKegiatan || ""
   )
     .trim()
     .toUpperCase();
 
-  const index = Number(
-    occurrenceIndex
+  const indeks = Number(
+    indeksPelaksanaan
   );
 
-  if (!base) {
+  if (!dasar) {
     throw new Error(
-      "referenceId Kegiatan wajib diisi untuk membuat ID Pelaksanaan."
+      "ID referensi Kegiatan wajib diisi."
     );
   }
 
   if (
-    !Number.isInteger(index) ||
-    index < 0
+    !Number.isInteger(indeks) ||
+    indeks < 0
   ) {
     throw new Error(
-      "occurrenceIndex Pelaksanaan tidak valid."
+      "Indeks Pelaksanaan tidak valid."
     );
   }
 
-  const executionNumber = String(
-    index + 1
-  ).padStart(2, "0");
-
-  return `${base}-P${executionNumber}`;
+  return `${dasar}-P${String(
+    indeks + 1
+  ).padStart(2, "0")}`;
 }
 
 
-/**
- * Format ID Sesi Absensi.
- *
- * executionReferenceId:
- * PK-2026-001-P01
- *
- * sessionIndex:
- * 0
- *
- * hasil:
- *
- * PK-2026-001-P01-S01
- */
-export function formatAttendanceSessionReferenceId(
-  executionReferenceId,
-  sessionIndex
+// ============================================================
+// FORMAT ID TURUNAN SESI
+// ============================================================
+
+export function formatIdReferensiSesi(
+  idReferensiPelaksanaan,
+  indeksSesi
 ) {
-  const base = String(
-    executionReferenceId || ""
+  const dasar = String(
+    idReferensiPelaksanaan || ""
   )
     .trim()
     .toUpperCase();
 
-  const index = Number(
-    sessionIndex
+  const indeks = Number(
+    indeksSesi
   );
 
-  if (!base) {
+  if (!dasar) {
     throw new Error(
-      "referenceId Pelaksanaan wajib diisi untuk membuat ID Sesi Absensi."
+      "ID referensi Pelaksanaan wajib diisi."
     );
   }
 
   if (
-    !Number.isInteger(index) ||
-    index < 0
+    !Number.isInteger(indeks) ||
+    indeks < 0
   ) {
     throw new Error(
-      "sessionIndex Sesi Absensi tidak valid."
+      "Indeks Sesi tidak valid."
     );
   }
 
-  const sessionNumber = String(
-    index + 1
-  ).padStart(2, "0");
-
-  return `${base}-S${sessionNumber}`;
+  return `${dasar}-S${String(
+    indeks + 1
+  ).padStart(2, "0")}`;
 }
 
 
@@ -612,43 +392,35 @@ export function formatAttendanceSessionReferenceId(
 // PARSER
 // ============================================================
 
-/**
- * Parse ID Kegiatan.
- *
- * PK-2026-014
- *
- * menjadi:
- *
- * {
- *   prefix: "PK",
- *   year: 2026,
- *   sequence: 14,
- *   raw: "PK-2026-014"
- * }
- */
-export function parseActivityReferenceId(
-  referenceId
+export function parseIdReferensiKegiatan(
+  idReferensi
 ) {
-  const raw = String(
-    referenceId || ""
+  const mentah = String(
+    idReferensi || ""
   )
     .trim()
     .toUpperCase();
 
-  const match =
+  const cocok =
     /^([A-Z]{2,10})-(\d{4})-(\d{3,})$/.exec(
-      raw
+      mentah
     );
 
-  if (!match) {
+  if (!cocok) {
     return null;
   }
 
   return {
-    prefix: match[1],
-    year: Number(match[2]),
-    sequence: Number(match[3]),
-    raw,
+    awalan:
+      cocok[1],
+
+    tahun:
+      Number(cocok[2]),
+
+    nomorUrut:
+      Number(cocok[3]),
+
+    mentah,
   };
 }
 
@@ -657,225 +429,36 @@ export function parseActivityReferenceId(
 // VALIDATOR
 // ============================================================
 
-/**
- * Validasi ID Kegiatan.
- *
- * isValidActivityReferenceId(
- *   "PK-2026-014"
- * )
- *
- * -> true
- *
- *
- * Dengan activityType:
- *
- * isValidActivityReferenceId(
- *   "PK-2026-014",
- *   "work_program"
- * )
- *
- * -> true
- *
- *
- * isValidActivityReferenceId(
- *   "MT-2026-014",
- *   "work_program"
- * )
- *
- * -> false
- */
-export function isValidActivityReferenceId(
-  referenceId,
-  activityType = null
+export function validasiIdReferensiKegiatan(
+  idReferensi,
+  jenisKegiatan = null
 ) {
-  const parsed =
-    parseActivityReferenceId(
-      referenceId
+  const hasil =
+    parseIdReferensiKegiatan(
+      idReferensi
     );
 
-  if (!parsed) {
+  if (!hasil) {
     return false;
   }
 
-  if (activityType) {
-    const scheme =
-      getActivityReferenceIdScheme(
-        activityType
-      );
-
+  if (jenisKegiatan) {
     return (
-      parsed.prefix ===
-      scheme.prefix
+      hasil.awalan ===
+      ambilSkemaIdKegiatan(
+        jenisKegiatan
+      ).awalan
     );
   }
 
-  const registeredPrefixes =
+  const semuaAwalan =
     Object.values(
-      REFERENCE_ID_SCHEMES.activity
+      SKEMA_ID_REFERENSI.kegiatan
     ).map(
-      (scheme) => scheme.prefix
+      (skema) => skema.awalan
     );
 
-  return registeredPrefixes.includes(
-    parsed.prefix
+  return semuaAwalan.includes(
+    hasil.awalan
   );
 }
-
-
-// ============================================================
-// REFERENCE ID DISPLAY HELPER
-// ============================================================
-
-/**
- * Helper sederhana untuk UI.
- *
- * Jika ID tersedia:
- *
- * PK-2026-001
- *
- * Jika belum tersedia:
- *
- * -
- */
-export function formatReferenceIdDisplay(
-  referenceId
-) {
-  const value = String(
-    referenceId || ""
-  ).trim();
-
-  return value || "-";
-}
-
-
-/**
- * Format ID + nama untuk kebutuhan dropdown,
- * tabel, laporan, atau demo.
- *
- * formatActivityDisplay({
- *   referenceId: "PK-2026-001",
- *   title: "Class Meeting 2026"
- * })
- *
- * ->
- *
- * PK-2026-001 · Class Meeting 2026
- */
-export function formatActivityDisplay({
-  referenceId,
-  title,
-} = {}) {
-  const id =
-    formatReferenceIdDisplay(
-      referenceId
-    );
-
-  const activityTitle = String(
-    title || ""
-  ).trim();
-
-  if (
-    id === "-" &&
-    !activityTitle
-  ) {
-    return "-";
-  }
-
-  if (id === "-") {
-    return activityTitle;
-  }
-
-  if (!activityTitle) {
-    return id;
-  }
-
-  return `${id} · ${activityTitle}`;
-}
-
-
-// ============================================================
-// USAGE
-// ============================================================
-//
-// Di SeleksiKegiatanOverlay.jsx:
-//
-// import {
-//   generateActivityReferenceId,
-// } from "@/lib/codefication";
-//
-//
-// Saat submit:
-//
-// const referenceYear =
-//   Number(
-//     String(
-//       form.startDate || ""
-//     ).slice(0, 4)
-//   ) ||
-//   new Date().getFullYear();
-//
-//
-// const referenceId =
-//   await generateActivityReferenceId(
-//     activityType,
-//     {
-//       year: referenceYear,
-//     }
-//   );
-//
-//
-// createdActivity = await addDoc(
-//   "Kegiatan",
-//   {
-//     referenceId,
-//
-//     title,
-//     activityType,
-//
-//     ...
-//   }
-// );
-//
-//
-// ============================================================
-// HASIL
-// ============================================================
-//
-// Firestore:
-//
-// Kegiatan
-// └── xKs82JhP9...          ← Auto ID Firestore
-//
-// isi:
-//
-// {
-//   referenceId: "PK-2026-001",
-//   title: "Class Meeting 2026",
-//   activityType: "work_program"
-// }
-//
-//
-//
-// PelaksanaanKegiatan:
-//
-// {
-//   activityId: "xKs82JhP9..."
-// }
-//
-//
-//
-// Jadi hubungan database TETAP:
-//
-// Kegiatan document.id
-//        ↓
-//    activityId
-//        ↓
-// PelaksanaanKegiatan
-//
-//
-// sedangkan yang dilihat user:
-//
-// ID Kegiatan
-// PK-2026-001
-//
-// ============================================================

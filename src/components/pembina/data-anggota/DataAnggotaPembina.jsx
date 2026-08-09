@@ -12,7 +12,7 @@ import {
   percentage,
   rowsOf,
   sortDateDesc,
-} from "@/components/pembina/_shared/firestoreHelpers";
+} from "./dataAnggotaHelpers";
 import {
   Avatar,
   DisabledAction,
@@ -22,7 +22,13 @@ import {
   PageHeading,
   PageLoading,
   StatCard,
-} from "@/components/pembina/_shared/PembinaUi";
+} from "./DataAnggotaUi";
+import {
+  FIELD,
+  KOLEKSI,
+  STATUS_KEANGGOTAAN,
+  STATUS_RESMI_ANGGOTA,
+} from "./konfigurasiDataAnggota";
 import BadanPengurusSection, {
   isBadanPengurus,
   isBadanPengurusDivision,
@@ -36,17 +42,17 @@ export default function DataAnggotaPembina() {
   const { colRef } = useDb();
   const { openAnggotaDetail } = useAnggotaDetailOverlay();
 
-  const members = useCollection(() => colRef("Anggota"), [], {
+  const members = useCollection(() => colRef(KOLEKSI.ANGGOTA), [], {
     enabled: true,
   });
-  const divisions = useCollection(() => colRef("Divisi"), [], {
+  const divisions = useCollection(() => colRef(KOLEKSI.DIVISI), [], {
     enabled: true,
   });
-  const periods = useCollection(() => colRef("Periode"), [], {
+  const periods = useCollection(() => colRef(KOLEKSI.PERIODE), [], {
     enabled: true,
   });
   const summaries = useCollection(
-    () => colRef("RingkasanAbsensi"),
+    () => colRef(KOLEKSI.RINGKASAN_ABSENSI),
     [],
     { enabled: true }
   );
@@ -64,53 +70,58 @@ export default function DataAnggotaPembina() {
 
   const data = useMemo(() => {
     const divisionRows = rowsOf(divisions);
+    const periodRows = rowsOf(periods);
     const summaryRows = rowsOf(summaries);
 
     const divisionMap = new Map(
       divisionRows.map((item) => [item.id, item])
     );
+    const periodMap = new Map(
+      periodRows.map((item) => [item.id, item])
+    );
     const summaryMap = new Map(
-      summaryRows.map((item) => [item.memberId, item])
+      summaryRows.map((item) => [item[FIELD.RINGKASAN_ABSENSI.ID_ANGGOTA], item])
     );
 
     const memberRows = rowsOf(members).map((item) => ({
       ...item,
-      division: divisionMap.get(item.divisionId) || null,
-      summary: summaryMap.get(item.id) || null,
+      divisi: divisionMap.get(item[FIELD.ANGGOTA.ID_DIVISI]) || null,
+      periodeData: periodMap.get(item[FIELD.ANGGOTA.ID_PERIODE]) || null,
+      ringkasan: summaryMap.get(item.id) || null,
     }));
 
     const official = memberRows.filter((item) =>
-      ["active", "inactive", "suspended"].includes(
-        item.membershipStatus
-      )
+      STATUS_RESMI_ANGGOTA.includes(item[FIELD.ANGGOTA.STATUS_KEANGGOTAAN])
     );
 
     const pendingMembers = sortDateDesc(
       memberRows
         .filter(
-          (item) => item.membershipStatus === "pending_review"
+          (item) => item[FIELD.ANGGOTA.STATUS_KEANGGOTAAN] === STATUS_KEANGGOTAAN.MENUNGGU_REVIEW
         )
         .map((item) => ({
           ...item,
-          reviewSubmittedAt:
-            item.submittedAt || item.createdAt || item.updatedAt,
+          waktuPengajuanReview:
+            item[FIELD.ANGGOTA.DIAJUKAN_PADA] ||
+            item[FIELD.ANGGOTA.DIBUAT_PADA] ||
+            item[FIELD.ANGGOTA.DIPERBARUI_PADA],
         })),
-      "reviewSubmittedAt"
+      "waktuPengajuanReview"
     );
 
     const keyword = search.trim().toLowerCase();
 
     const matchesSearch = (item) =>
       !keyword ||
-      item.fullName?.toLowerCase().includes(keyword) ||
+      item.namaLengkap?.toLowerCase().includes(keyword) ||
       item.nis?.toLowerCase().includes(keyword) ||
-      item.className?.toLowerCase().includes(keyword) ||
-      item.organisationPosition?.toLowerCase().includes(keyword);
+      item.namaKelas?.toLowerCase().includes(keyword) ||
+      item.jabatanOrganisasi?.toLowerCase().includes(keyword);
 
     const matchesBaseFilters = (item) =>
       (statusFilter === "all" ||
-        item.membershipStatus === statusFilter) &&
-      (periodFilter === "all" || item.period === periodFilter);
+        item[FIELD.ANGGOTA.STATUS_KEANGGOTAAN] === statusFilter) &&
+      (periodFilter === "all" || item[FIELD.ANGGOTA.ID_PERIODE] === periodFilter);
 
     const allBoardMembers = official.filter(isBadanPengurus);
     const allSekbidMembers = official.filter(
@@ -126,14 +137,13 @@ export default function DataAnggotaPembina() {
         matchesBaseFilters(item) &&
         matchesSearch(item) &&
         (divisionFilter === "all" ||
-          item.divisionId === divisionFilter)
+          item[FIELD.ANGGOTA.ID_DIVISI] === divisionFilter)
     );
 
-    // Saat satu sekbid dipilih, Ketua Sekbid berada pada urutan pertama.
-    const filtered =
-      divisionFilter === "all"
-        ? sortDateDesc(filteredSekbidMembers, "updatedAt")
-        : sortSekbidMembers(filteredSekbidMembers);
+    // Ketua Sekbid selalu berada pada urutan paling atas, baik saat
+    // menampilkan semua sekbid maupun ketika satu sekbid dipilih.
+    // Anggota selain Ketua Sekbid mengikuti urutan dari sortSekbidMembers.
+    const filtered = sortSekbidMembers(filteredSekbidMembers);
 
     // Badan Pengurus tidak ditampilkan pada dropdown Sekbid.
     const sekbidRows = divisionRows.filter(
@@ -149,14 +159,14 @@ export default function DataAnggotaPembina() {
       pendingMembers,
       filtered,
       boardMembers,
-      active: official.filter(
-        (item) => item.membershipStatus === "active"
+      aktif: official.filter(
+        (item) => item[FIELD.ANGGOTA.STATUS_KEANGGOTAAN] === STATUS_KEANGGOTAAN.AKTIF
       ).length,
-      inactive: official.filter(
-        (item) => item.membershipStatus === "inactive"
+      nonaktif: official.filter(
+        (item) => item[FIELD.ANGGOTA.STATUS_KEANGGOTAAN] === STATUS_KEANGGOTAAN.NONAKTIF
       ).length,
-      suspended: official.filter(
-        (item) => item.membershipStatus === "suspended"
+      ditangguhkan: official.filter(
+        (item) => item[FIELD.ANGGOTA.STATUS_KEANGGOTAAN] === STATUS_KEANGGOTAAN.DITANGGUHKAN
       ).length,
       sekbidRows,
       divisionTotal:
@@ -166,6 +176,7 @@ export default function DataAnggotaPembina() {
   }, [
     members,
     divisions,
+    periods,
     summaries,
     search,
     divisionFilter,
@@ -209,7 +220,7 @@ export default function DataAnggotaPembina() {
         <StatCard
           icon="verified_user"
           label="Status Aktif"
-          value={data.active}
+          value={data.aktif}
           helper="Anggota aktif periode berjalan"
           accent="green"
         />
@@ -223,8 +234,8 @@ export default function DataAnggotaPembina() {
         <StatCard
           icon="person"
           label="Tidak Aktif"
-          value={data.inactive + data.suspended}
-          helper={`${data.inactive} tidak aktif, ${data.suspended} ditangguhkan`}
+          value={data.nonaktif + data.ditangguhkan}
+          helper={`${data.nonaktif} tidak aktif, ${data.ditangguhkan} ditangguhkan`}
           accent="red"
         />
       </section>
@@ -266,7 +277,7 @@ export default function DataAnggotaPembina() {
               <option value="all">Semua Sekbid</option>
               {data.sekbidRows.map((division) => (
                 <option key={division.id} value={division.id}>
-                  Sekbid {division.code} - {division.shortName}
+                  Sekbid {division.kode} - {division.namaSingkat}
                 </option>
               ))}
             </select>
@@ -277,9 +288,9 @@ export default function DataAnggotaPembina() {
               className="min-h-11 min-w-0 w-full rounded-xl border border-border bg-input px-3 text-sm outline-none focus:border-primary"
             >
               <option value="all">Semua Status</option>
-              <option value="active">Aktif</option>
-              <option value="inactive">Tidak Aktif</option>
-              <option value="suspended">Ditangguhkan</option>
+              <option value={STATUS_KEANGGOTAAN.AKTIF}>Aktif</option>
+              <option value={STATUS_KEANGGOTAAN.NONAKTIF}>Tidak Aktif</option>
+              <option value={STATUS_KEANGGOTAAN.DITANGGUHKAN}>Ditangguhkan</option>
             </select>
 
             <select
@@ -289,8 +300,8 @@ export default function DataAnggotaPembina() {
             >
               <option value="all">Semua Periode</option>
               {rowsOf(periods).map((period) => (
-                <option key={period.id} value={period.label}>
-                  {period.label}
+                <option key={period.id} value={period.id}>
+                  {period.namaPeriode || "-"}
                 </option>
               ))}
             </select>
@@ -318,7 +329,7 @@ export default function DataAnggotaPembina() {
                     key={member.id}
                     role="button"
                     tabIndex={0}
-                    title={`Lihat detail ${member.fullName || "anggota"}`}
+                    title={`Lihat detail ${member.namaLengkap || "anggota"}`}
                     onClick={() => openAnggotaDetail(member)}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" || event.key === " ") {
@@ -333,27 +344,27 @@ export default function DataAnggotaPembina() {
                     </td>
                     <td className="px-5 py-4">
                       <div className="flex items-center gap-3">
-                        <Avatar name={member.fullName} size="sm" />
+                        <Avatar name={member.namaLengkap} size="sm" />
                         <div>
                           <p className="text-sm font-semibold text-text">
-                            {member.fullName}
+                            {member.namaLengkap}
                           </p>
                           <p className="mt-1 text-xs text-text-muted">
-                            Bergabung {formatDate(member.joinedAt)}
+                            Bergabung {formatDate(member.bergabungPada)}
                           </p>
                         </div>
                       </div>
                     </td>
                     <td className="px-5 py-4 text-sm text-text-muted">
-                      {member.className || "-"}
+                      {member.namaKelas || "-"}
                     </td>
                     <td className="px-5 py-4">
                       <p className="text-sm font-semibold text-text">
-                        {member.organisationPosition || "Anggota"}
+                        {member.jabatanOrganisasi || "Anggota"}
                       </p>
                       <p className="mt-1 text-xs text-text-muted">
-                        {member.division
-                          ? `Sekbid ${member.division.code}: ${member.division.shortName}`
+                        {member.divisi
+                          ? `Sekbid ${member.divisi.kode}: ${member.divisi.namaSingkat}`
                           : "Belum memiliki sekbid"}
                       </p>
                     </td>
@@ -362,12 +373,12 @@ export default function DataAnggotaPembina() {
                         <div className="flex items-center justify-between text-xs">
                           <span className="font-semibold text-text">
                             {percentage(
-                              member.summary?.attendancePercentage
+                              member.ringkasan?.persentaseKehadiran
                             )}
                             %
                           </span>
                           <span className="text-text-muted">
-                            {member.summary?.totalActivities || 0} kegiatan
+                            {member.ringkasan?.jumlahKegiatan || 0} kegiatan
                           </span>
                         </div>
                         <div className="mt-2 h-2 overflow-hidden rounded-full bg-input">
@@ -375,7 +386,7 @@ export default function DataAnggotaPembina() {
                             className="h-full rounded-full bg-primary"
                             style={{
                               width: `${percentage(
-                                member.summary?.attendancePercentage
+                                member.ringkasan?.persentaseKehadiran
                               )}%`,
                             }}
                           />
@@ -384,7 +395,7 @@ export default function DataAnggotaPembina() {
                     </td>
                     <td className="px-5 py-4 text-center">
                       <MemberStatusBadge
-                        status={member.membershipStatus}
+                        status={member.statusKeanggotaan}
                       />
                     </td>
                     <td className="w-14 px-5 py-4 text-right">

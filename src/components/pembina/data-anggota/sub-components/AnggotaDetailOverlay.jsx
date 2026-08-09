@@ -6,48 +6,30 @@ import AppIcon from "@/components/global/AppIcon";
 import {
   Avatar,
   MemberStatusBadge,
-} from "@/components/pembina/_shared/PembinaUi";
+} from "../DataAnggotaUi";
 import {
   formatDate,
   formatDateTime,
   percentage,
-} from "@/components/pembina/_shared/firestoreHelpers";
+} from "../dataAnggotaHelpers";
+import {
+  KOLEKSI,
+  OPSI_STATUS_ANGGOTA,
+  STATUS_KEANGGOTAAN,
+  STATUS_RESMI_ANGGOTA,
+  buatPayloadReviewAnggota,
+  buatPayloadStatusAnggota,
+} from "../konfigurasiDataAnggota";
 import { useDb } from "@/context/DbContext";
 import { useOverlay } from "@/context/ui/OverlayContext";
 
-const OFFICIAL_STATUSES = ["active", "inactive", "suspended"];
-
-const STATUS_OPTIONS = [
-  {
-    value: "active",
-    label: "Aktif",
-    description: "Anggota aktif dan tercatat sebagai pengurus periode berjalan.",
-    icon: "verified_user",
-    iconClassName: "bg-emerald-50 text-emerald-700",
-  },
-  {
-    value: "inactive",
-    label: "Tidak Aktif",
-    description: "Anggota tetap tersimpan, tetapi tidak sedang aktif sebagai pengurus.",
-    icon: "person",
-    iconClassName: "bg-slate-100 text-slate-700",
-  },
-  {
-    value: "suspended",
-    label: "Ditangguhkan",
-    description: "Keanggotaan ditangguhkan sementara sampai ada keputusan berikutnya.",
-    icon: "block",
-    iconClassName: "bg-orange-50 text-orange-700",
-  },
-];
-
 function divisionLabel(member) {
-  const division = member?.division;
+  const division = member?.divisi;
 
   if (!division) return "-";
 
-  const code = String(division.code || "").trim();
-  const name = String(division.shortName || division.name || "").trim();
+  const code = String(division.kode || "").trim();
+  const name = String(division.namaSingkat || division.nama || "").trim();
 
   if (code && name) return `Sekbid ${code}: ${name}`;
   return name || code || "-";
@@ -87,20 +69,20 @@ export default function AnggotaDetailModal({ member, onClose }) {
   const [savingDecision, setSavingDecision] = useState(null);
   const [decisionError, setDecisionError] = useState("");
 
-  const attendance = percentage(member?.summary?.attendancePercentage);
-  const hasAttendance = Boolean(member?.summary);
-  const isPendingReview = member?.membershipStatus === "pending_review";
-  const canChangeOfficialStatus = OFFICIAL_STATUSES.includes(
-    member?.membershipStatus
+  const attendance = percentage(member?.ringkasan?.persentaseKehadiran);
+  const hasAttendance = Boolean(member?.ringkasan);
+  const isPendingReview = member?.statusKeanggotaan === STATUS_KEANGGOTAAN.MENUNGGU_REVIEW;
+  const canChangeOfficialStatus = STATUS_RESMI_ANGGOTA.includes(
+    member?.statusKeanggotaan
   );
 
   const contactItems = [
     ["Email", member?.email],
-    ["Nomor telepon", member?.phoneNumber || member?.phone],
+    ["Nomor telepon", member?.nomorTelepon],
   ].filter(([, value]) => hasValue(value));
 
-  const submittedAt =
-    member?.reviewSubmittedAt || member?.submittedAt || null;
+  const waktuPengajuan =
+    member?.waktuPengajuanReview || member?.diajukanPada || null;
 
   const openStatusPicker = () => {
     setDecisionError("");
@@ -123,18 +105,15 @@ export default function AnggotaDetailModal({ member, onClose }) {
     setDecisionError("");
 
     try {
-      const timestamp = serverTimestamp();
-      const payload = {
-        membershipStatus: nextStatus,
-        reviewedAt: timestamp,
-        updatedAt: timestamp,
-      };
+      const waktu = serverTimestamp();
+      const payload = buatPayloadReviewAnggota({
+        statusKeanggotaan: nextStatus,
+        waktu,
+        isiBergabungPada:
+          nextStatus === STATUS_KEANGGOTAAN.AKTIF && !member?.bergabungPada,
+      });
 
-      if (nextStatus === "active" && !member?.joinedAt) {
-        payload.joinedAt = timestamp;
-      }
-
-      await updateDoc("Anggota", member.id, payload);
+      await updateDoc(KOLEKSI.ANGGOTA, member.id, payload);
       closeAllOverlays();
     } catch (error) {
       console.error("UPDATE MEMBER REVIEW ERROR:", error);
@@ -150,17 +129,17 @@ export default function AnggotaDetailModal({ member, onClose }) {
     <section className="max-h-[calc(100dvh-2rem)] w-full max-w-3xl overflow-y-auto rounded-3xl border border-border bg-card shadow-2xl sm:max-h-[calc(100dvh-3rem)]">
       <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-border bg-card/95 p-5 backdrop-blur sm:p-6">
         <div className="flex min-w-0 items-center gap-4">
-          <Avatar name={member?.fullName} size="lg" />
+          <Avatar name={member?.namaLengkap} size="lg" />
 
           <div className="min-w-0">
             <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">
               Detail Anggota
             </p>
             <h2 className="mt-1 truncate text-xl font-bold text-text sm:text-2xl">
-              {member?.fullName || "-"}
+              {member?.namaLengkap || "-"}
             </h2>
             <p className="mt-1 text-sm text-text-muted">
-              {member?.organisationPosition || "Anggota"}
+              {member?.jabatanOrganisasi || "Anggota"}
             </p>
           </div>
         </div>
@@ -182,25 +161,25 @@ export default function AnggotaDetailModal({ member, onClose }) {
               Status keanggotaan
             </p>
             <p className="mt-1 text-sm font-semibold text-text">
-              Data anggota tersimpan pada periode {member?.period || "-"}
+              Data anggota tersimpan pada periode {member?.periodeData?.namaPeriode || "-"}
             </p>
           </div>
-          <MemberStatusBadge status={member?.membershipStatus} />
+          <MemberStatusBadge status={member?.statusKeanggotaan} />
         </div>
 
         <DetailSection title="Informasi Organisasi" icon="badge">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <DetailItem label="NIS" value={member?.nis || "-"} />
-            <DetailItem label="Kelas" value={member?.className || "-"} />
+            <DetailItem label="Kelas" value={member?.namaKelas || "-"} />
             <DetailItem
               label="Jabatan"
-              value={member?.organisationPosition || "Anggota"}
+              value={member?.jabatanOrganisasi || "Anggota"}
             />
             <DetailItem label="Divisi / Sekbid" value={divisionLabel(member)} />
-            <DetailItem label="Periode" value={member?.period || "-"} />
+            <DetailItem label="Periode" value={member?.periodeData?.namaPeriode || "-"} />
             <DetailItem
               label="Tanggal bergabung"
-              value={formatDate(member?.joinedAt)}
+              value={formatDate(member?.bergabungPada)}
             />
           </div>
         </DetailSection>
@@ -229,7 +208,7 @@ export default function AnggotaDetailModal({ member, onClose }) {
                 </div>
 
                 <p className="text-right text-sm text-text-muted">
-                  {member?.summary?.totalActivities || 0} kegiatan
+                  {member?.ringkasan?.jumlahKegiatan || 0} kegiatan
                 </p>
               </div>
 
@@ -245,19 +224,19 @@ export default function AnggotaDetailModal({ member, onClose }) {
 
         <DetailSection title="Riwayat Data" icon="calendar_month">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {submittedAt && (
+            {waktuPengajuan && (
               <DetailItem
                 label="Tanggal pengajuan"
-                value={formatDateTime(submittedAt)}
+                value={formatDateTime(waktuPengajuan)}
               />
             )}
             <DetailItem
               label="Dibuat"
-              value={formatDateTime(member?.createdAt)}
+              value={formatDateTime(member?.dibuatPada)}
             />
             <DetailItem
               label="Terakhir diperbarui"
-              value={formatDateTime(member?.updatedAt)}
+              value={formatDateTime(member?.diperbaruiPada)}
             />
           </div>
         </DetailSection>
@@ -278,11 +257,11 @@ export default function AnggotaDetailModal({ member, onClose }) {
                 <button
                   type="button"
                   disabled={Boolean(savingDecision)}
-                  onClick={() => handleReviewDecision("active")}
+                  onClick={() => handleReviewDecision(STATUS_KEANGGOTAAN.AKTIF)}
                   className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-bold text-white transition hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <AppIcon name="check" size={20} />
-                  {savingDecision === "active"
+                  {savingDecision === STATUS_KEANGGOTAAN.AKTIF
                     ? "Menerima pendaftaran..."
                     : "Terima Pendaftaran"}
                 </button>
@@ -290,11 +269,11 @@ export default function AnggotaDetailModal({ member, onClose }) {
                 <button
                   type="button"
                   disabled={Boolean(savingDecision)}
-                  onClick={() => handleReviewDecision("rejected")}
+                  onClick={() => handleReviewDecision(STATUS_KEANGGOTAAN.DITOLAK)}
                   className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-xl border border-error-text px-5 text-sm font-bold text-error-text transition hover:bg-error-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-error-text focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <AppIcon name="close" size={20} />
-                  {savingDecision === "rejected"
+                  {savingDecision === STATUS_KEANGGOTAAN.DITOLAK
                     ? "Menolak pendaftaran..."
                     : "Tolak Pendaftaran"}
                 </button>
@@ -330,7 +309,7 @@ function StatusPickerModal({ member, onClose }) {
     if (
       !member?.id ||
       savingStatus ||
-      nextStatus === member?.membershipStatus
+      nextStatus === member?.statusKeanggotaan
     ) {
       return;
     }
@@ -339,10 +318,14 @@ function StatusPickerModal({ member, onClose }) {
     setError("");
 
     try {
-      await updateDoc("Anggota", member.id, {
-        membershipStatus: nextStatus,
-        updatedAt: serverTimestamp(),
-      });
+      await updateDoc(
+        KOLEKSI.ANGGOTA,
+        member.id,
+        buatPayloadStatusAnggota({
+          statusKeanggotaan: nextStatus,
+          waktu: serverTimestamp(),
+        })
+      );
 
       closeAllOverlays();
     } catch (updateError) {
@@ -366,7 +349,7 @@ function StatusPickerModal({ member, onClose }) {
             Ubah Status Aktif
           </h2>
           <p className="mt-2 text-sm leading-6 text-text-muted">
-            Pilih status baru untuk {member?.fullName || "anggota ini"}.
+            Pilih status baru untuk {member?.namaLengkap || "anggota ini"}.
           </p>
         </div>
 
@@ -390,8 +373,8 @@ function StatusPickerModal({ member, onClose }) {
           </div>
         )}
 
-        {STATUS_OPTIONS.map((option) => {
-          const isCurrent = option.value === member?.membershipStatus;
+        {OPSI_STATUS_ANGGOTA.map((option) => {
+          const isCurrent = option.value === member?.statusKeanggotaan;
           const isSaving = savingStatus === option.value;
 
           return (

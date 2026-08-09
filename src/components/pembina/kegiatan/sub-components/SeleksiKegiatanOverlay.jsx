@@ -6,17 +6,37 @@ import AppIcon from "@/components/global/AppIcon";
 import { collection, doc, writeBatch } from "firebase/firestore";
 import { useDb } from "@/context/DbContext";
 import { useOverlay } from "@/context/ui/OverlayContext";
-import { generateActivityReferenceId } from "@/lib/codefication";
+import { buatIdReferensiKegiatan } from "@/lib/codefication";
+import {
+  FREKUENSI_PENGULANGAN,
+  JENIS_KEGIATAN,
+  KOLEKSI,
+  MODE_JADWAL,
+  MODE_KEPANITIAAN_USULAN,
+  STATUS_JADWAL,
+  STATUS_KEGIATAN,
+  STATUS_LAPORAN,
+  STATUS_PELAKSANAAN,
+  STATUS_PROPOSAL,
+  STATUS_SESI_ABSENSI,
+  STATUS_TIM,
+  SUMBER_FINALISASI_JADWAL,
+  buatDrafFormSeleksiKegiatan,
+  buatPayloadKegiatan,
+  buatPayloadPelaksanaan,
+  buatPayloadSesiAbsensi,
+  buatPayloadTautanProposal,
+} from "../konfigurasiManajemenKegiatan";
 
 const CATEGORY_OPTIONS = [
   {
-    value: "work_program",
+    value: JENIS_KEGIATAN.PROGRAM_KERJA,
     label: "Program Kerja",
     description: "Rencana kegiatan yang dapat dihubungkan dengan proposal anggota.",
     icon: "campaign",
   },
   {
-    value: "meeting",
+    value: JENIS_KEGIATAN.RAPAT,
     label: "Meeting",
     description: "Agenda rapat, koordinasi, atau pertemuan organisasi.",
     icon: "groups",
@@ -27,35 +47,6 @@ const DEFAULT_SESSION_START = "08:00";
 const DEFAULT_SESSION_END = "12:00";
 const MAX_SERIES_OCCURRENCES = 500;
 
-const INITIAL_FORM = {
-  title: "",
-  description: "",
-  divisionId: "",
-  location: "",
-
-  // Jadwal hasil pleno / rencana awal. Ini menjadi dasar reminder proposal.
-  scheduleMode: "once",
-  startDate: "",
-  endDate: "",
-  dailySchedules: {},
-  recurrenceInterval: "1",
-  recurrenceUntil: "",
-
-  proposalId: "",
-
-  // Jadwal final hanya dipakai untuk Program Kerja yang sudah memiliki proposal.
-  // Meeting tetap memakai jadwal utama sebagai jadwal final.
-  finalScheduleSource: "planned",
-  finalScheduleMode: "once",
-  finalStartDate: "",
-  finalEndDate: "",
-  finalDailySchedules: {},
-  finalRecurrenceInterval: "1",
-  finalRecurrenceUntil: "",
-
-  organiserMemberId: "",
-  committeeMemberIds: [],
-};
 
 function combineDateAndTime(date, time) {
   if (!date || !time) return null;
@@ -240,72 +231,55 @@ function normalizeDateInput(value) {
 function extractProposalSchedule(proposal) {
   if (!proposal) return null;
 
-  const source =
-    proposal.proposedSchedule ||
-    proposal.executionSchedule ||
-    proposal.scheduleProposal ||
-    proposal.schedule ||
-    {};
+  const source = proposal.jadwalUsulan || {};
 
   const startDate = normalizeDateInput(
-    source.startDate ||
-      source.firstStartDate ||
-      proposal.proposedStartDate ||
-      proposal.startDate ||
-      proposal.activityDate
+    source.tanggalMulai || source.tanggalMulaiPertama || proposal.tanggalMulaiUsulan
   );
 
   const endDate =
     normalizeDateInput(
-      source.endDate ||
-        source.firstEndDate ||
-        proposal.proposedEndDate ||
-        proposal.endDate ||
-        proposal.activityEndDate
+      source.tanggalSelesai ||
+        source.tanggalSelesaiPertama ||
+        proposal.tanggalSelesaiUsulan
     ) || startDate;
 
   if (!startDate || !endDate) return null;
 
   const scheduleMode =
-    source.mode === "recurring" ||
-    source.scheduleMode === "recurring" ||
-    source.recurrence?.enabled === true
+    source.modeJadwal === MODE_JADWAL.BERULANG ||
+    source.pengulangan?.aktif === true
       ? "recurring"
       : "once";
 
   const recurrenceInterval = String(
-    source.recurrenceInterval ||
-      source.interval ||
-      source.recurrence?.interval ||
-      1
+    source.intervalPengulangan || source.pengulangan?.interval || 1
   );
 
   const recurrenceUntil = normalizeDateInput(
-    source.recurrenceUntil ||
-      source.until ||
-      source.recurrence?.until
+    source.pengulanganSampai || source.pengulangan?.sampai
   );
 
   const dailySchedules = {};
 
-  if (Array.isArray(source.sessionTemplate)) {
+  if (Array.isArray(source.templateSesi)) {
     const dates = listDateKeys(startDate, endDate);
-    source.sessionTemplate.forEach((session, index) => {
+    source.templateSesi.forEach((session, index) => {
       const date = dates[index];
       if (!date) return;
       dailySchedules[date] = {
-        startTime: session?.startTime || DEFAULT_SESSION_START,
-        endTime: session?.endTime || DEFAULT_SESSION_END,
+        startTime: session?.jamMulai || DEFAULT_SESSION_START,
+        endTime: session?.jamSelesai || DEFAULT_SESSION_END,
       };
     });
   }
 
-  if (source.dailySchedules && typeof source.dailySchedules === "object") {
-    Object.entries(source.dailySchedules).forEach(([date, schedule]) => {
+  if (source.jadwalHarian && typeof source.jadwalHarian === "object") {
+    Object.entries(source.jadwalHarian).forEach(([date, schedule]) => {
       if (!date) return;
       dailySchedules[date] = {
-        startTime: schedule?.startTime || DEFAULT_SESSION_START,
-        endTime: schedule?.endTime || DEFAULT_SESSION_END,
+        startTime: schedule?.jamMulai || DEFAULT_SESSION_START,
+        endTime: schedule?.jamSelesai || DEFAULT_SESSION_END,
       };
     });
   }
@@ -324,31 +298,16 @@ function extractProposalSchedule(proposal) {
 function extractProposedCommittee(proposal) {
   if (!proposal) {
     return {
-      mode: "unknown",
+      mode: MODE_KEPANITIAAN_USULAN.BELUM_DIATUR,
       organiserMemberId: "",
       memberIds: [],
     };
   }
 
-  const source =
-    proposal.proposedCommittee ||
-    proposal.committeeProposal ||
-    proposal.proposedTeam ||
-    {};
+  const source = proposal.kepanitiaanUsulan || {};
 
-  const organiserMemberId =
-    source.organiserMemberId ||
-    source.leadMemberId ||
-    source.committeeLeadMemberId ||
-    proposal.proposedOrganiserMemberId ||
-    proposal.proposedCommitteeLeadMemberId ||
-    "";
-
-  const rawMemberIds =
-    source.memberIds ||
-    source.committeeMemberIds ||
-    proposal.proposedCommitteeMemberIds ||
-    [];
+  const organiserMemberId = source.idPenanggungJawab || "";
+  const rawMemberIds = source.idAnggotaPanitia || [];
 
   const memberIds = Array.from(
     new Set(
@@ -358,19 +317,12 @@ function extractProposedCommittee(proposal) {
     )
   );
 
-  const explicitMode =
-    source.mode ||
-    proposal.proposedCommitteeMode ||
-    proposal.committeeProposalMode ||
-    "";
-
   const mode =
-    explicitMode === "supervisor_decides" ||
-    explicitMode === "delegated_to_supervisor"
-      ? "supervisor_decides"
+    source.mode === MODE_KEPANITIAAN_USULAN.DITENTUKAN_PEMBINA
+      ? MODE_KEPANITIAAN_USULAN.DITENTUKAN_PEMBINA
       : organiserMemberId || memberIds.length
-        ? "proposed"
-        : explicitMode || "unknown";
+        ? MODE_KEPANITIAAN_USULAN.DIUSULKAN
+        : MODE_KEPANITIAAN_USULAN.BELUM_DIATUR;
 
   return {
     mode,
@@ -447,32 +399,32 @@ async function deleteRefsInChunks(db, refs, chunkSize = 425) {
 
 function proposalTitle(proposal) {
   return (
-    proposal?.activity?.title ||
-    proposal?.title ||
-    proposal?.fileName ||
+    proposal?.kegiatan?.namaKegiatan ||
+    proposal?.namaKegiatan ||
+    proposal?.namaFile ||
     "Proposal tanpa judul"
   );
 }
 
 function resolveUploader(proposal, memberMap) {
-  const uploaderId = proposal?.uploadedBy || null;
+  const uploaderId = proposal?.idPengunggah || null;
 
   const member =
-    proposal?.uploader ||
+    proposal?.pengunggah ||
     (uploaderId ? memberMap.get(String(uploaderId)) : null) ||
     null;
 
   return {
     id: uploaderId || "Unknown",
     name:
-      member?.fullName ||
-      member?.name ||
-      member?.username ||
+      member?.namaLengkap ||
+      member?.nama ||
+      member?.namaPengguna ||
       "Unknown",
     position:
-      member?.organisationPosition ||
-      member?.position ||
-      member?.role ||
+      member?.jabatanOrganisasi ||
+      member?.jabatan ||
+      member?.peran ||
       "Unknown",
   };
 }
@@ -531,8 +483,8 @@ export default function SeleksiKegiatanModal({
   const { db, addDoc, updateDoc, deleteDoc, serverTimestamp } = useDb();
 
   const [step, setStep] = useState("select");
-  const [activityType, setActivityType] = useState("work_program");
-  const [form, setForm] = useState(INITIAL_FORM);
+  const [activityType, setActivityType] = useState(JENIS_KEGIATAN.PROGRAM_KERJA);
+  const [form, setForm] = useState(() => buatDrafFormSeleksiKegiatan());
   const [proposalPanelOpen, setProposalPanelOpen] = useState(false);
   const [proposalSearch, setProposalSearch] = useState("");
   const [committeeSearch, setCommitteeSearch] = useState("");
@@ -543,7 +495,7 @@ export default function SeleksiKegiatanModal({
     const map = new Map();
 
     members.forEach((member) => {
-      [member?.id, member?.uid, member?.userId, member?.authUid]
+      [member?.id, member?.idPengguna, member?.idPengguna, member?.idAutentikasi]
         .filter(Boolean)
         .forEach((key) => map.set(String(key), member));
     });
@@ -554,8 +506,8 @@ export default function SeleksiKegiatanModal({
   const officialMembers = useMemo(
     () =>
       [...members].sort((a, b) =>
-        String(a?.fullName || a?.name || "").localeCompare(
-          String(b?.fullName || b?.name || ""),
+        String(a?.namaLengkap || a?.nama || "").localeCompare(
+          String(b?.namaLengkap || b?.nama || ""),
           "id"
         )
       ),
@@ -572,7 +524,7 @@ export default function SeleksiKegiatanModal({
         const uploader = resolveUploader(proposal, memberMap);
         return Boolean(
           proposalTitle(proposal).toLowerCase().includes(keyword) ||
-            String(proposal?.fileName || "").toLowerCase().includes(keyword) ||
+            String(proposal?.namaFile || "").toLowerCase().includes(keyword) ||
             String(uploader.name).toLowerCase().includes(keyword) ||
             String(uploader.position).toLowerCase().includes(keyword) ||
             String(uploader.id).toLowerCase().includes(keyword)
@@ -593,10 +545,10 @@ export default function SeleksiKegiatanModal({
 
     return officialMembers.filter((member) =>
       [
-        member?.fullName,
-        member?.name,
-        member?.organisationPosition,
-        member?.position,
+        member?.namaLengkap,
+        member?.nama,
+        member?.jabatanOrganisasi,
+        member?.jabatan,
       ]
         .filter(Boolean)
         .some((value) => String(value).toLowerCase().includes(keyword))
@@ -739,7 +691,7 @@ export default function SeleksiKegiatanModal({
 
   const chooseCategory = (value) => {
     setActivityType(value);
-    setForm(INITIAL_FORM);
+    setForm(buatDrafFormSeleksiKegiatan());
     setProposalPanelOpen(false);
     setProposalSearch("");
     setCommitteeSearch("");
@@ -750,7 +702,7 @@ export default function SeleksiKegiatanModal({
   const changeType = (value) => {
     setActivityType(value);
     setForm((current) => ({
-      ...INITIAL_FORM,
+      ...buatDrafFormSeleksiKegiatan(),
       title: current.title,
       description: current.description,
       divisionId: current.divisionId,
@@ -943,7 +895,7 @@ export default function SeleksiKegiatanModal({
   };
 
   const selectProposal = (proposal) => {
-    if (proposal.activityId) return;
+    if (proposal.idKegiatan) return;
 
     setForm((current) => ({
       ...current,
@@ -1019,7 +971,7 @@ export default function SeleksiKegiatanModal({
       return;
     }
 
-    if (selectedProposal?.activityId) {
+    if (selectedProposal?.idKegiatan) {
       setError("Proposal tersebut sudah terhubung dengan kegiatan lain.");
       return;
     }
@@ -1036,7 +988,7 @@ export default function SeleksiKegiatanModal({
     }
 
     const shouldFinalizeWorkProgram =
-      activityType === "work_program" && hasSelectedProposal;
+      activityType === JENIS_KEGIATAN.PROGRAM_KERJA && hasSelectedProposal;
 
     if (shouldFinalizeWorkProgram) {
       if (!form.finalStartDate || !form.finalEndDate || !hasValidFinalDateRange) {
@@ -1066,7 +1018,7 @@ export default function SeleksiKegiatanModal({
     }
 
     const shouldGenerateChildren =
-      activityType === "meeting" || shouldFinalizeWorkProgram;
+      activityType === JENIS_KEGIATAN.RAPAT || shouldFinalizeWorkProgram;
 
     const effectiveScheduleForm =
       shouldFinalizeWorkProgram ? finalScheduleForm : form;
@@ -1128,30 +1080,35 @@ export default function SeleksiKegiatanModal({
       seriesLastSession || plannedSeriesLastSession || null;
 
     const makeSchedulePayload = (scheduleFormValue, sessions) => ({
-      mode: scheduleFormValue.scheduleMode,
-      firstStartDate: scheduleFormValue.startDate,
-      firstEndDate: scheduleFormValue.endDate,
-      daysPerOccurrence: sessions.length,
-      defaultSessionStart: DEFAULT_SESSION_START,
-      defaultSessionEnd: DEFAULT_SESSION_END,
-      sessionTemplate: sessions.map((session) => ({
-        dayOffset: session.dayOffset,
-        startTime: session.startTime,
-        endTime: session.endTime,
-        durationMinutes: session.durationMinutes,
+      modeJadwal:
+        scheduleFormValue.scheduleMode === "recurring"
+          ? MODE_JADWAL.BERULANG
+          : MODE_JADWAL.SEKALI,
+      tanggalMulaiPertama: scheduleFormValue.startDate,
+      tanggalSelesaiPertama: scheduleFormValue.endDate,
+      jumlahHariPerPelaksanaan: sessions.length,
+      jamMulaiDefault: DEFAULT_SESSION_START,
+      jamSelesaiDefault: DEFAULT_SESSION_END,
+      templateSesi: sessions.map((session) => ({
+        selisihHari: session.dayOffset,
+        jamMulai: session.startTime,
+        jamSelesai: session.endTime,
+        durasiMenit: session.durationMinutes,
       })),
     });
 
     const makeRecurrencePayload = (scheduleFormValue) => ({
-      scope: "period",
-      enabled: scheduleFormValue.scheduleMode === "recurring",
-      frequency:
-        scheduleFormValue.scheduleMode === "recurring" ? "weekly" : null,
+      cakupan: "periode",
+      aktif: scheduleFormValue.scheduleMode === "recurring",
+      frekuensi:
+        scheduleFormValue.scheduleMode === "recurring"
+          ? FREKUENSI_PENGULANGAN.MINGGUAN
+          : null,
       interval:
         scheduleFormValue.scheduleMode === "recurring"
           ? Math.max(1, Number(scheduleFormValue.recurrenceInterval) || 1)
           : null,
-      until:
+      sampai:
         scheduleFormValue.scheduleMode === "recurring" &&
         scheduleFormValue.recurrenceUntil
           ? new Date(`${scheduleFormValue.recurrenceUntil}T23:59:59`)
@@ -1162,23 +1119,33 @@ export default function SeleksiKegiatanModal({
     const plannedRecurrencePayload = makeRecurrencePayload(form);
 
     const resolvedFinalSchedulePayload =
-      activityType === "work_program"
+      activityType === JENIS_KEGIATAN.PROGRAM_KERJA
         ? hasSelectedProposal
           ? makeSchedulePayload(finalScheduleForm, finalBaseSessions)
           : null
         : makeSchedulePayload(form, baseSessions);
 
     const resolvedFinalRecurrencePayload =
-      activityType === "work_program"
+      activityType === JENIS_KEGIATAN.PROGRAM_KERJA
         ? hasSelectedProposal
           ? makeRecurrencePayload(finalScheduleForm)
           : null
         : makeRecurrencePayload(form);
 
-    const effectiveSchedulePayload =
-      resolvedFinalSchedulePayload || plannedSchedulePayload;
-    const effectiveRecurrencePayload =
-      resolvedFinalRecurrencePayload || plannedRecurrencePayload;
+    const snapshotJadwalProposal =
+      activityType === JENIS_KEGIATAN.PROGRAM_KERJA && proposalSchedule
+        ? {
+            jadwal: makeSchedulePayload(proposalSchedule, proposalBaseSessions),
+            pengulangan: makeRecurrencePayload(proposalSchedule),
+          }
+        : null;
+
+    const sumberFinalisasiJadwal =
+      form.finalScheduleSource === "proposal"
+        ? SUMBER_FINALISASI_JADWAL.PROPOSAL
+        : form.finalScheduleSource === "manual"
+          ? SUMBER_FINALISASI_JADWAL.MANUAL
+          : SUMBER_FINALISASI_JADWAL.RENCANA;
 
     setSaving(true);
     setError("");
@@ -1188,161 +1155,163 @@ export default function SeleksiKegiatanModal({
     let proposalLinked = false;
 
     try {
-      // ID Kegiatan yang dibaca manusia / digunakan pada UI, laporan, dan demo.
-      // Relasi antar-document tetap menggunakan Firestore Auto ID.
       const referenceYear =
         Number(String(form.startDate || "").slice(0, 4)) ||
         new Date().getFullYear();
 
-      const referenceId = await generateActivityReferenceId(activityType, {
-        year: referenceYear,
+      const referenceId = await buatIdReferensiKegiatan(activityType, {
+        tahun: referenceYear,
       });
 
-      createdActivity = await addDoc("Kegiatan", {
-        referenceId,
-        title,
-        description: form.description.trim(),
-        activityType,
-        location,
-        periodId: periodId || null,
+      const payloadKegiatan = buatPayloadKegiatan({
+        idReferensi: referenceId,
+        namaKegiatan: title,
+        deskripsi: form.description.trim(),
+        jenisKegiatan: activityType,
+        lokasi: location,
+        idPeriode: periodId || null,
 
-        // Field kompatibilitas lama memakai jadwal efektif:
-        // final jika sudah difinalisasi, rencana jika masih planned.
-        startAt: activeFirstSession?.startAt || null,
-        endAt: activeFirstLastSession?.endAt || null,
-        seriesEndAt: activeSeriesLastSession?.endAt || null,
-        calendarDayCount: effectiveBaseSessions.length,
-        occurrenceCount: occurrences.length,
-        attendanceSessionCount: totalSessionCount,
-        durationMinutes:
-          shouldFinalizeWorkProgram
-            ? finalTotalScheduledMinutes
-            : totalScheduledMinutes,
+        waktuMulai: activeFirstSession?.startAt || null,
+        waktuSelesai: activeFirstLastSession?.endAt || null,
+        waktuSelesaiSeri: activeSeriesLastSession?.endAt || null,
+        jumlahHariKalender: effectiveBaseSessions.length,
+        jumlahPelaksanaan: occurrences.length,
+        jumlahSesiAbsensi: totalSessionCount,
+        durasiMenit: shouldFinalizeWorkProgram
+          ? finalTotalScheduledMinutes
+          : totalScheduledMinutes,
 
-        // Source of truth baru.
-        plannedSchedule:
-          activityType === "work_program" ? plannedSchedulePayload : null,
-        plannedRecurrence:
-          activityType === "work_program" ? plannedRecurrencePayload : null,
-        plannedOccurrenceCount:
-          activityType === "work_program" ? plannedOccurrences.length : null,
-        plannedAttendanceSessionCount:
-          activityType === "work_program" ? plannedTotalSessionCount : null,
+        jadwalRencana:
+          activityType === JENIS_KEGIATAN.PROGRAM_KERJA
+            ? plannedSchedulePayload
+            : null,
+        pengulanganRencana:
+          activityType === JENIS_KEGIATAN.PROGRAM_KERJA
+            ? plannedRecurrencePayload
+            : null,
+        jumlahPelaksanaanRencana:
+          activityType === JENIS_KEGIATAN.PROGRAM_KERJA
+            ? plannedOccurrences.length
+            : null,
+        jumlahSesiAbsensiRencana:
+          activityType === JENIS_KEGIATAN.PROGRAM_KERJA
+            ? plannedTotalSessionCount
+            : null,
 
-        finalSchedule: resolvedFinalSchedulePayload,
-        finalRecurrence: resolvedFinalRecurrencePayload,
-        scheduleStatus:
-          activityType === "work_program"
+        jadwalFinal: resolvedFinalSchedulePayload,
+        pengulanganFinal: resolvedFinalRecurrencePayload,
+        statusJadwal:
+          activityType === JENIS_KEGIATAN.PROGRAM_KERJA
             ? hasSelectedProposal
-              ? "finalized"
-              : "planned"
-            : "finalized",
-        scheduleFinalizedFrom:
-          activityType === "work_program" && hasSelectedProposal
-            ? form.finalScheduleSource
-            : activityType === "meeting"
-              ? "direct"
+              ? STATUS_JADWAL.DIFINALISASI
+              : STATUS_JADWAL.DIRENCANAKAN
+            : STATUS_JADWAL.DIFINALISASI,
+        sumberFinalisasiJadwal:
+          activityType === JENIS_KEGIATAN.PROGRAM_KERJA && hasSelectedProposal
+            ? sumberFinalisasiJadwal
+            : activityType === JENIS_KEGIATAN.RAPAT
+              ? SUMBER_FINALISASI_JADWAL.LANGSUNG
               : null,
-        scheduleFinalizedAt:
-          activityType === "work_program" && hasSelectedProposal
+        difinalisasiPada:
+          activityType === JENIS_KEGIATAN.PROGRAM_KERJA && hasSelectedProposal
             ? serverTimestamp()
-            : activityType === "meeting"
+            : activityType === JENIS_KEGIATAN.RAPAT
               ? serverTimestamp()
               : null,
 
-        // Kompatibilitas query/tampilan lama.
-        schedule: effectiveSchedulePayload,
-        recurrence: effectiveRecurrencePayload,
+        idDivisi: form.divisionId || null,
+        idPenanggungJawab: form.organiserMemberId || null,
+        idAnggotaPanitia:
+          activityType === JENIS_KEGIATAN.PROGRAM_KERJA
+            ? [...form.committeeMemberIds]
+            : [],
 
-        divisionId: form.divisionId || null,
-        organiserMemberId: form.organiserMemberId || null,
-        committeeMemberIds:
-          activityType === "work_program" ? form.committeeMemberIds : [],
-
-        proposalId:
-          activityType === "work_program" ? form.proposalId || null : null,
-        proposalStatus:
-          activityType === "work_program"
-            ? selectedProposal?.status || (hasSelectedProposal ? "submitted" : "not_submitted")
+        idProposal:
+          activityType === JENIS_KEGIATAN.PROGRAM_KERJA
+            ? form.proposalId || null
             : null,
-
-        // Snapshot jadwal yang diajukan anggota jika Proposal sudah menyimpan
-        // data jadwal terstruktur. PDF tetap menjadi dokumen pendukung.
-        proposalScheduleSnapshot:
-          activityType === "work_program" && selectedProposal
-            ? proposalSchedule
+        statusProposal:
+          activityType === JENIS_KEGIATAN.PROGRAM_KERJA
+            ? selectedProposal?.status ||
+              (hasSelectedProposal
+                ? STATUS_PROPOSAL.DIAJUKAN
+                : STATUS_PROPOSAL.BELUM_DIAJUKAN)
             : null,
+        snapshotJadwalProposal,
 
-        teamStatus:
-          activityType === "work_program"
+        statusTim:
+          activityType === JENIS_KEGIATAN.PROGRAM_KERJA
             ? hasSelectedProposal
               ? form.organiserMemberId || form.committeeMemberIds.length
-                ? "finalized_by_supervisor"
-                : "pending_finalization"
-              : "not_submitted"
+                ? STATUS_TIM.DIFINALISASI_PEMBINA
+                : STATUS_TIM.MENUNGGU_FINALISASI
+              : STATUS_TIM.BELUM_DIAJUKAN
             : null,
 
         status:
-          activityType === "work_program"
+          activityType === JENIS_KEGIATAN.PROGRAM_KERJA
             ? hasSelectedProposal
-              ? "upcoming"
-              : "planned"
-            : "draft",
+              ? STATUS_KEGIATAN.AKAN_DATANG
+              : STATUS_KEGIATAN.TERENCANA
+            : STATUS_KEGIATAN.DRAF,
+        statusLaporan:
+          activityType === JENIS_KEGIATAN.PROGRAM_KERJA
+            ? STATUS_LAPORAN.BELUM_DIMULAI
+            : null,
 
-        reportStatus:
-          activityType === "work_program" ? "not_started" : null,
-
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+        dibuatPada: serverTimestamp(),
+        diperbaruiPada: serverTimestamp(),
       });
+
+      createdActivity = await addDoc(KOLEKSI.KEGIATAN, payloadKegiatan);
 
       const childWrites = [];
 
-      // Program Kerja tanpa proposal berhenti di level Kegiatan + rencana.
-      // PelaksanaanKegiatan dan SesiAbsensi baru lahir setelah jadwal final.
       if (shouldGenerateChildren) {
         for (const occurrence of occurrences) {
           const first = occurrence.sessions[0];
           const last = occurrence.sessions[occurrence.sessions.length - 1];
-          const pelaksanaanRef = doc(collection(db, "PelaksanaanKegiatan"));
+          const pelaksanaanRef = doc(
+            collection(db, KOLEKSI.PELAKSANAAN_KEGIATAN)
+          );
 
           childWrites.push({
             ref: pelaksanaanRef,
-            data: {
-              activityId: createdActivity.id,
-              periodId: periodId || null,
-              occurrenceIndex: occurrence.occurrenceIndex,
-              startDate: occurrence.startDate,
-              endDate: occurrence.endDate,
-              startAt: first?.startAt || null,
-              endAt: last?.endAt || null,
-              sessionCount: occurrence.sessions.length,
-              status: "planned",
-              cancelledAt: null,
-              createdAt: serverTimestamp(),
-              updatedAt: serverTimestamp(),
-            },
+            data: buatPayloadPelaksanaan({
+              idKegiatan: createdActivity.id,
+              idPeriode: periodId || null,
+              indeksPelaksanaan: occurrence.occurrenceIndex,
+              tanggalMulai: occurrence.startDate,
+              tanggalSelesai: occurrence.endDate,
+              waktuMulai: first?.startAt || null,
+              waktuSelesai: last?.endAt || null,
+              jumlahSesi: occurrence.sessions.length,
+              status: STATUS_PELAKSANAAN.TERENCANA,
+              dibatalkanPada: null,
+              dibuatPada: serverTimestamp(),
+              diperbaruiPada: serverTimestamp(),
+            }),
           });
 
           for (const session of occurrence.sessions) {
-            const sesiRef = doc(collection(db, "SesiAbsensi"));
+            const sesiRef = doc(collection(db, KOLEKSI.SESI_ABSENSI));
 
             childWrites.push({
               ref: sesiRef,
-              data: {
-                activityId: createdActivity.id,
-                pelaksanaanId: pelaksanaanRef.id,
-                periodId: periodId || null,
-                occurrenceIndex: occurrence.occurrenceIndex,
-                sessionIndex: session.sessionIndex,
-                date: session.date,
-                startAt: session.startAt,
-                endAt: session.endAt,
-                durationMinutes: session.durationMinutes,
-                status: "scheduled",
-                createdAt: serverTimestamp(),
-                updatedAt: serverTimestamp(),
-              },
+              data: buatPayloadSesiAbsensi({
+                idKegiatan: createdActivity.id,
+                idPelaksanaan: pelaksanaanRef.id,
+                idPeriode: periodId || null,
+                indeksPelaksanaan: occurrence.occurrenceIndex,
+                indeksSesi: session.sessionIndex,
+                tanggal: session.date,
+                waktuMulai: session.startAt,
+                waktuSelesai: session.endAt,
+                durasiMenit: session.durationMinutes,
+                status: STATUS_SESI_ABSENSI.TERJADWAL,
+                dibuatPada: serverTimestamp(),
+                diperbaruiPada: serverTimestamp(),
+              }),
             });
           }
         }
@@ -1352,11 +1321,12 @@ export default function SeleksiKegiatanModal({
         committedChildRefs = await commitSetChunks(db, childWrites);
       }
 
-      if (activityType === "work_program" && selectedProposal) {
-        await updateDoc("Proposal", selectedProposal.id, {
-          activityId: createdActivity.id,
-          updatedAt: serverTimestamp(),
-        });
+      if (activityType === JENIS_KEGIATAN.PROGRAM_KERJA && selectedProposal) {
+        await updateDoc(
+          KOLEKSI.PROPOSAL,
+          selectedProposal.id,
+          buatPayloadTautanProposal(createdActivity.id, serverTimestamp())
+        );
         proposalLinked = true;
       }
 
@@ -1365,10 +1335,11 @@ export default function SeleksiKegiatanModal({
       console.error("CREATE ACTIVITY ERROR:", submitError);
 
       if (proposalLinked && selectedProposal) {
-        await updateDoc("Proposal", selectedProposal.id, {
-          activityId: null,
-          updatedAt: serverTimestamp(),
-        }).catch(() => {});
+        await updateDoc(
+          KOLEKSI.PROPOSAL,
+          selectedProposal.id,
+          buatPayloadTautanProposal(null, serverTimestamp())
+        ).catch(() => {});
       }
 
       if (committedChildRefs.length) {
@@ -1376,7 +1347,7 @@ export default function SeleksiKegiatanModal({
       }
 
       if (createdActivity?.id) {
-        await deleteDoc("Kegiatan", createdActivity.id).catch(() => {});
+        await deleteDoc(KOLEKSI.KEGIATAN, createdActivity.id).catch(() => {});
       }
 
       setError(
@@ -1405,7 +1376,7 @@ export default function SeleksiKegiatanModal({
           <h2 className="mt-1 text-xl font-bold tracking-tight text-text sm:text-2xl">
             {step === "select"
               ? "Pilih Kategori Kegiatan"
-              : activityType === "work_program"
+              : activityType === JENIS_KEGIATAN.PROGRAM_KERJA
                 ? proposalPanelOpen
                   ? "Pilih Proposal"
                   : "Tambah Program Kerja"
@@ -1415,7 +1386,7 @@ export default function SeleksiKegiatanModal({
           <p className="mt-2 text-sm leading-6 text-text-muted">
             {step === "select"
               ? "Tentukan jenis kegiatan yang ingin dibuat."
-              : activityType === "work_program"
+              : activityType === JENIS_KEGIATAN.PROGRAM_KERJA
                 ? proposalPanelOpen
                   ? "Pilih proposal yang sudah diunggah anggota dan belum terhubung ke kegiatan lain."
                   : "Buat rencana kegiatan dan hubungkan proposal jika sudah tersedia."
@@ -1476,13 +1447,13 @@ export default function SeleksiKegiatanModal({
                   <div className="mb-6">
                     <div className="inline-flex w-full rounded-2xl bg-input p-1 sm:w-auto">
                       <TypeTab
-                        active={activityType === "work_program"}
+                        active={activityType === JENIS_KEGIATAN.PROGRAM_KERJA}
                         icon="campaign"
                         label="Program Kerja"
                         onClick={() => changeType("work_program")}
                       />
                       <TypeTab
-                        active={activityType === "meeting"}
+                        active={activityType === JENIS_KEGIATAN.RAPAT}
                         icon="groups"
                         label="Meeting"
                         onClick={() => changeType("meeting")}
@@ -1497,7 +1468,7 @@ export default function SeleksiKegiatanModal({
                         value={form.title}
                         onChange={updateField("title")}
                         placeholder={
-                          activityType === "work_program"
+                          activityType === JENIS_KEGIATAN.PROGRAM_KERJA
                             ? "Contoh: Class Meeting 2026"
                             : "Contoh: Meeting Persiapan Class Meeting"
                         }
@@ -1524,8 +1495,8 @@ export default function SeleksiKegiatanModal({
                         <option value="">Pengurus Inti / belum ditentukan</option>
                         {divisions.map((division) => (
                           <option key={division.id} value={division.id}>
-                            {division.code ? `Sekbid ${division.code} - ` : ""}
-                            {division.shortName || division.name || "Tanpa nama"}
+                            {division.kode ? `Sekbid ${division.kode} - ` : ""}
+                            {division.namaSingkat || division.nama || "Tanpa nama"}
                           </option>
                         ))}
                       </select>
@@ -1573,7 +1544,7 @@ export default function SeleksiKegiatanModal({
                       <div className="mt-6">
                         <div className="mb-4">
                           <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">
-                            {activityType === "work_program"
+                            {activityType === JENIS_KEGIATAN.PROGRAM_KERJA
                               ? form.scheduleMode === "recurring"
                                 ? "Rencana Pelaksanaan Pertama"
                                 : "Rencana Pelaksanaan"
@@ -1582,7 +1553,7 @@ export default function SeleksiKegiatanModal({
                                 : "Rentang Pelaksanaan"}
                           </p>
                           <p className="mt-1 text-sm text-text-muted">
-                            {activityType === "work_program"
+                            {activityType === JENIS_KEGIATAN.PROGRAM_KERJA
                               ? "Jadwal ini adalah rencana awal hasil pleno dan menjadi dasar reminder proposal. Setiap tanggal tetap dapat diatur jamnya."
                               : "Setiap tanggal di dalam rentang akan otomatis dibuat dengan jam default 08:00–12:00 dan tetap dapat diedit."}
                           </p>
@@ -1626,7 +1597,7 @@ export default function SeleksiKegiatanModal({
                             </p>
                             <p className="mt-1 text-base font-bold text-text">
                               {dayCount
-                                ? activityType === "work_program"
+                                ? activityType === JENIS_KEGIATAN.PROGRAM_KERJA
                                   ? `${dayCount} hari · ${dayCount} calon sesi absensi`
                                   : `${dayCount} hari · ${dayCount} sesi absensi`
                                 : "0 hari"}
@@ -1645,12 +1616,12 @@ export default function SeleksiKegiatanModal({
                           <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
                             <div>
                               <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">
-                                {activityType === "work_program"
+                                {activityType === JENIS_KEGIATAN.PROGRAM_KERJA
                                   ? "Rencana Harian"
                                   : "Pelaksanaan Harian & Sesi Absensi"}
                               </p>
                               <p className="mt-1 text-sm leading-6 text-text-muted">
-                                {activityType === "work_program"
+                                {activityType === JENIS_KEGIATAN.PROGRAM_KERJA
                                   ? "Jam dibuat otomatis 08:00–12:00. Rencana ini belum membuat unit absensi sebelum jadwal difinalisasi."
                                   : "Jam dibuat otomatis 08:00–12:00. Ubah per tanggal jika jadwal berbeda."}
                               </p>
@@ -1681,7 +1652,7 @@ export default function SeleksiKegiatanModal({
                                   <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_160px_160px] md:items-end">
                                     <div className="min-w-0">
                                       <p className="text-[10px] font-bold uppercase tracking-wider text-primary">
-                                        {activityType === "work_program"
+                                        {activityType === JENIS_KEGIATAN.PROGRAM_KERJA
                                           ? `Rencana Hari ${session.dayOffset + 1}`
                                           : `Pelaksanaan Hari ${session.dayOffset + 1}`}
                                       </p>
@@ -1777,7 +1748,7 @@ export default function SeleksiKegiatanModal({
                               <div className="flex items-center justify-between gap-3">
                                 <div>
                                   <p className="text-sm font-bold text-text">
-                                    {activityType === "work_program"
+                                    {activityType === JENIS_KEGIATAN.PROGRAM_KERJA
                                       ? "Preview Rencana"
                                       : "Preview Pelaksanaan"}
                                   </p>
@@ -1809,7 +1780,7 @@ export default function SeleksiKegiatanModal({
                                         : `${formatDateOnly(occurrence.startDate)} - ${formatDateOnly(occurrence.endDate)}`}
                                     </p>
                                     <p className="mt-1 text-[11px] text-text-muted">
-                                      {occurrence.sessions.length} {activityType === "work_program" ? "calon sesi absensi" : "sesi absensi"}
+                                      {occurrence.sessions.length} {activityType === JENIS_KEGIATAN.PROGRAM_KERJA ? "calon sesi absensi" : "sesi absensi"}
                                     </p>
                                   </div>
                                 ))}
@@ -1821,7 +1792,7 @@ export default function SeleksiKegiatanModal({
                     </div>
                   </ProgressiveSection>
 
-                          {activityType === "work_program" && (
+                          {activityType === JENIS_KEGIATAN.PROGRAM_KERJA && (
                             <div className="mt-6 rounded-2xl border border-primary/20 bg-primary/5 p-4 sm:p-5">
                               <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                                 <div className="flex min-w-0 items-start gap-3">
@@ -1870,7 +1841,7 @@ export default function SeleksiKegiatanModal({
                             </div>
                           )}
 
-                          {activityType === "work_program" && (
+                          {activityType === JENIS_KEGIATAN.PROGRAM_KERJA && (
                             <ProgressiveSection open={hasSelectedProposal}>
                               <div className="mt-6 border-t border-border pt-6">
                                 <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -2236,7 +2207,7 @@ export default function SeleksiKegiatanModal({
                             </ProgressiveSection>
                           )}
 
-                          {activityType === "meeting" && (
+                          {activityType === JENIS_KEGIATAN.RAPAT && (
                             <div className="mt-6">
                               <FormField label="Penanggung Jawab">
                                 <select
@@ -2247,9 +2218,9 @@ export default function SeleksiKegiatanModal({
                                   <option value="">Belum ditentukan</option>
                                   {officialMembers.map((member) => (
                                     <option key={member.id} value={member.id}>
-                                      {member.fullName || member.name || "Anggota tanpa nama"}
-                                      {member.organisationPosition || member.position
-                                        ? ` — ${member.organisationPosition || member.position}`
+                                      {member.namaLengkap || member.nama || "Anggota tanpa nama"}
+                                      {member.jabatanOrganisasi || member.jabatan
+                                        ? ` — ${member.jabatanOrganisasi || member.jabatan}`
                                         : ""}
                                     </option>
                                   ))}
@@ -2258,7 +2229,7 @@ export default function SeleksiKegiatanModal({
                             </div>
                           )}
 
-                          {activityType === "work_program" && (
+                          {activityType === JENIS_KEGIATAN.PROGRAM_KERJA && (
                             <ProgressiveSection open={hasSelectedProposal}>
                               <div className="mt-6 border-t border-border pt-6">
                                 <div className="mb-5">
@@ -2281,7 +2252,7 @@ export default function SeleksiKegiatanModal({
                                       </p>
                                     </div>
 
-                                    {proposedCommittee.mode === "proposed" && (
+                                    {proposedCommittee.mode === MODE_KEPANITIAAN_USULAN.DIUSULKAN && (
                                       <button
                                         type="button"
                                         onClick={applyProposedCommittee}
@@ -2293,11 +2264,11 @@ export default function SeleksiKegiatanModal({
                                     )}
                                   </div>
 
-                                  {proposedCommittee.mode === "supervisor_decides" ? (
+                                  {proposedCommittee.mode === MODE_KEPANITIAAN_USULAN.DITENTUKAN_PEMBINA ? (
                                     <div className="mt-4 rounded-xl bg-card px-3 py-3 text-xs leading-5 text-text-muted">
                                       Pengirim menyerahkan penentuan kepanitiaan sepenuhnya kepada Pembina.
                                     </div>
-                                  ) : proposedCommittee.mode === "proposed" ? (
+                                  ) : proposedCommittee.mode === MODE_KEPANITIAAN_USULAN.DIUSULKAN ? (
                                     <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
                                       <ProposalMeta
                                         label="Ketua / PJ Diusulkan"
@@ -2306,12 +2277,12 @@ export default function SeleksiKegiatanModal({
                                             String(
                                               proposedCommittee.organiserMemberId
                                             )
-                                          )?.fullName ||
+                                          )?.namaLengkap ||
                                           memberMap.get(
                                             String(
                                               proposedCommittee.organiserMemberId
                                             )
-                                          )?.name ||
+                                          )?.nama ||
                                           proposedCommittee.organiserMemberId ||
                                           "Belum diusulkan"
                                         }
@@ -2337,9 +2308,9 @@ export default function SeleksiKegiatanModal({
                                     <option value="">Belum ditentukan</option>
                                     {officialMembers.map((member) => (
                                       <option key={member.id} value={member.id}>
-                                        {member.fullName || member.name || "Anggota tanpa nama"}
-                                        {member.organisationPosition || member.position
-                                          ? ` — ${member.organisationPosition || member.position}`
+                                        {member.namaLengkap || member.nama || "Anggota tanpa nama"}
+                                        {member.jabatanOrganisasi || member.jabatan
+                                          ? ` — ${member.jabatanOrganisasi || member.jabatan}`
                                           : " — Unknown"}
                                       </option>
                                     ))}
@@ -2367,9 +2338,9 @@ export default function SeleksiKegiatanModal({
                                     {filteredCommitteeMembers.length ? (
                                       filteredCommitteeMembers.map((member) => {
                                         const checked = form.committeeMemberIds.includes(member.id);
-                                        const memberName = member.fullName || member.name || "Unknown";
+                                        const memberName = member.namaLengkap || member.nama || "Unknown";
                                         const memberPosition =
-                                          member.organisationPosition || member.position || "Unknown";
+                                          member.jabatanOrganisasi || member.jabatan || "Unknown";
                                         return (
                                           <label
                                             key={member.id}
@@ -2437,7 +2408,7 @@ export default function SeleksiKegiatanModal({
                       disabled={
                         saving ||
                         !hasValidAttendanceSchedule ||
-                        (activityType === "work_program" &&
+                        (activityType === JENIS_KEGIATAN.PROGRAM_KERJA &&
                           hasSelectedProposal &&
                           !hasValidFinalAttendanceSchedule)
                       }
@@ -2446,7 +2417,7 @@ export default function SeleksiKegiatanModal({
                       <AppIcon name="check" size={18} />
                       {saving
                         ? "Menyimpan..."
-                        : activityType === "work_program"
+                        : activityType === JENIS_KEGIATAN.PROGRAM_KERJA
                           ? hasSelectedProposal
                             ? "Finalisasi & Simpan"
                             : "Simpan sebagai Terencana"
@@ -2490,7 +2461,7 @@ export default function SeleksiKegiatanModal({
                     {proposalOptions.length ? (
                       proposalOptions.map((proposal) => {
                         const uploader = resolveUploader(proposal, memberMap);
-                        const linked = Boolean(proposal.activityId);
+                        const linked = Boolean(proposal.idKegiatan);
                         const selected = proposal.id === form.proposalId;
 
                         return (
@@ -2513,7 +2484,7 @@ export default function SeleksiKegiatanModal({
                                   {proposalTitle(proposal)}
                                 </p>
                                 <p className="mt-1 truncate text-xs text-text-muted">
-                                  {proposal.fileName || "File proposal tidak terdeteksi"}
+                                  {proposal.namaFile || "File proposal tidak terdeteksi"}
                                 </p>
                               </div>
 

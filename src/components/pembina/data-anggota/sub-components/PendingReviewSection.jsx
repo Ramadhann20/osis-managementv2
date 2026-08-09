@@ -7,11 +7,11 @@ import {
   Avatar,
   EmptyState,
   MemberStatusBadge,
-} from "@/components/pembina/_shared/PembinaUi";
+} from "../DataAnggotaUi";
 import {
   formatDate,
   formatDateTime,
-} from "@/components/pembina/_shared/firestoreHelpers";
+} from "../dataAnggotaHelpers";
 import { useAnggotaDetailOverlay } from "./AnggotaDetailOverlay";
 
 export default function PendingReviewSection({ members = [] }) {
@@ -93,7 +93,7 @@ export default function PendingReviewSection({ members = [] }) {
                         key={member.id}
                         role="button"
                         tabIndex={0}
-                        title={`Lihat detail ${member.fullName || "anggota"}`}
+                        title={`Lihat detail ${member.namaLengkap || "anggota"}`}
                         onClick={() => openAnggotaDetail(member)}
                         onKeyDown={(event) => {
                           if (event.key === "Enter" || event.key === " ") {
@@ -109,45 +109,45 @@ export default function PendingReviewSection({ members = [] }) {
 
                         <td className="px-5 py-4">
                           <div className="flex items-center gap-3">
-                            <Avatar name={member.fullName} size="sm" />
+                            <Avatar name={member.namaLengkap} size="sm" />
 
                             <div className="min-w-0">
                               <p className="max-w-56 truncate text-sm font-semibold text-text">
-                                {member.fullName || "-"}
+                                {member.namaLengkap || "-"}
                               </p>
                               <p className="mt-1 text-xs text-text-muted">
-                                Diperbarui {formatDate(member.updatedAt)}
+                                Diperbarui {formatDate(member.diperbaruiPada)}
                               </p>
                             </div>
                           </div>
                         </td>
 
                         <td className="px-5 py-4 text-sm text-text-muted">
-                          {member.className || "-"}
+                          {member.namaKelas || "-"}
                         </td>
 
                         <td className="px-5 py-4">
                           <p className="text-sm font-semibold text-text">
-                            {member.organisationPosition || "Anggota"}
+                            {member.jabatanOrganisasi || "Anggota"}
                           </p>
                           <p className="mt-1 text-xs text-text-muted">
-                            {member.division
-                              ? `Sekbid ${member.division.code}: ${member.division.shortName}`
+                            {member.divisi
+                              ? `Sekbid ${member.divisi.kode}: ${member.divisi.namaSingkat}`
                               : "Belum memilih sekbid"}
                           </p>
                         </td>
 
                         <td className="px-5 py-4 text-sm text-text-muted">
-                          {member.period || "-"}
+                          {member.periodeData?.namaPeriode || "-"}
                         </td>
 
                         <td className="px-5 py-4 text-sm text-text-muted">
-                          {formatDateTime(member.reviewSubmittedAt)}
+                          {formatDateTime(member.waktuPengajuanReview)}
                         </td>
 
                         <td className="px-5 py-4 text-center">
                           <MemberStatusBadge
-                            status={member.membershipStatus}
+                            status={member.statusKeanggotaan}
                           />
                         </td>
 
