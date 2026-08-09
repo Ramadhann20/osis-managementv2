@@ -127,7 +127,7 @@ export function adalahDrafPengajuanAnggota(kegiatan) {
   return adalahPengajuanKegiatanAnggota(kegiatan) && kegiatan?.status === "draf";
 }
 
-export default function PengajuanKegiatanCollapsible({ rows = [], onOpenDetail }) {
+export default function PengajuanKegiatanCollapsible({ rows = [], onOpenReview }) {
   const [isOpen, setIsOpen] = useState(false);
   const contentId = useId();
 
@@ -229,13 +229,17 @@ export default function PengajuanKegiatanCollapsible({ rows = [], onOpenDetail }
                       <th className="px-5 py-4">Rencana Pelaksanaan</th>
                       <th className="px-5 py-4">Peserta</th>
                       <th className="px-5 py-4 text-center">Status</th>
-                      <th className="w-14 px-5 py-4" aria-label="Detail" />
+                      <th className="px-5 py-4 text-right">Aksi</th>
                     </tr>
                   </thead>
 
                   <tbody className="divide-y divide-border">
                     {pengajuanRows.map((activity) => (
-                      <PengajuanRow key={activity.id} activity={activity} onOpenDetail={onOpenDetail} />
+                      <PengajuanRow
+                        key={activity.id}
+                        activity={activity}
+                        onOpenReview={onOpenReview}
+                      />
                     ))}
                   </tbody>
                 </table>
@@ -256,7 +260,7 @@ export default function PengajuanKegiatanCollapsible({ rows = [], onOpenDetail }
   );
 }
 
-function PengajuanRow({ activity, onOpenDetail }) {
+function PengajuanRow({ activity, onOpenReview }) {
   const pengajuan =
     activity.metadataPengajuan || ambilPengajuanKegiatan(activity);
   const status = statusConfig(pengajuan?.status);
@@ -341,14 +345,14 @@ function PengajuanRow({ activity, onOpenDetail }) {
         </span>
       </td>
 
-      <td className="w-14 px-5 py-4 text-right">
+      <td className="px-5 py-4 text-right">
         <button
           type="button"
-          onClick={() => onOpenDetail?.(activity)}
-          title="Lihat detail pengajuan"
-          className="inline-flex h-9 w-9 items-center justify-center rounded-xl text-text-muted transition hover:bg-primary/10 hover:text-primary"
+          onClick={() => onOpenReview?.(activity)}
+          className="inline-flex min-h-9 items-center justify-center gap-1.5 rounded-xl border border-primary/20 bg-primary/5 px-3 text-xs font-bold text-primary transition hover:border-primary/40 hover:bg-primary/10"
         >
-          <AppIcon name="chevron_right" size={21} />
+          Review
+          <AppIcon name="chevron_right" size={17} />
         </button>
       </td>
     </tr>

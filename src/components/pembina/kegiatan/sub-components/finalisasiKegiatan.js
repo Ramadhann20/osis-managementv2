@@ -325,6 +325,14 @@ export async function finalisasiKegiatan({
         }
       : null;
 
+    const pesertaRencana = activity.pesertaRencana
+      ? {
+          ...activity.pesertaRencana,
+          statusReview: "disetujui",
+          ditinjauPada: waktu,
+        }
+      : null;
+
     const updatePayload = {
       jadwalFinal: activity.jadwalFinal || activity.jadwalRencana || null,
       pengulanganFinal:
@@ -343,9 +351,14 @@ export async function finalisasiKegiatan({
       pesertaFinal: {
         idAnggota: ids,
         jumlahPeserta: ids.length,
-        sumber: activity.usulanPeserta ? "usulan_anggota" : "ditentukan_pembina",
+        sumber: activity.pesertaRencana
+          ? "pengajuan_rapat"
+          : activity.usulanPeserta
+            ? "usulan_anggota"
+            : "ditentukan_pembina",
         difinalisasiPada: waktu,
       },
+      pesertaRencana,
       usulanPeserta,
       status: STATUS_KEGIATAN.AKAN_DATANG,
       statusLaporan:
@@ -365,6 +378,7 @@ export async function finalisasiKegiatan({
         ...activity.pengajuanRapat,
         status: "disetujui",
         ditinjauPada: waktu,
+        disetujuiPada: waktu,
       };
     }
 

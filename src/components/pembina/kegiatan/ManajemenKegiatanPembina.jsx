@@ -31,6 +31,7 @@ import PengajuanKegiatanCollapsible, {
   ambilPengajuanKegiatan,
 } from "./sub-components/PengajuanKegiatanCollapsible";
 import { useKegiatanDetailsOverlay } from "./sub-components/KegiatanDetailsOverlay";
+import { usePengajuanKegiatanReviewOverlay } from "./sub-components/PengajuanKegiatanReviewOverlay";
 import {
   FIELD,
   JENIS_KEGIATAN,
@@ -45,6 +46,7 @@ import {
 export default function ManajemenKegiatanPembina() {
   const { colRef } = useDb();
   const { openKegiatanDetails } = useKegiatanDetailsOverlay();
+  const { openReviewPengajuanKegiatan } = usePengajuanKegiatanReviewOverlay();
 
   // Semua nama collection dipusatkan di konfigurasi modul.
   const kegiatan = useCollection(() => colRef(KOLEKSI.KEGIATAN), [], {
@@ -198,6 +200,7 @@ export default function ManajemenKegiatanPembina() {
           activityType={jenisKegiatan}
           setActivityType={setJenisKegiatan}
           onOpenDetail={openKegiatanDetails}
+          onReviewPengajuan={openReviewPengajuanKegiatan}
         />
       )}
 
@@ -233,6 +236,7 @@ function ActivitiesTab({
   activityType,
   setActivityType,
   onOpenDetail,
+  onReviewPengajuan,
 }) {
   // Draf yang berasal dari pengajuan Anggota dipisahkan dari daftar kegiatan resmi.
   // Dokumen tetap berada di collection Kegiatan; komponen collapsible hanya
@@ -285,7 +289,10 @@ function ActivitiesTab({
     <div className="mt-6">
       {typeSelector}
 
-      <PengajuanKegiatanCollapsible rows={rows} onOpenDetail={onOpenDetail} />
+      <PengajuanKegiatanCollapsible
+        rows={rows}
+        onOpenReview={onReviewPengajuan}
+      />
 
       <div className="mt-7">
         {activityType === JENIS_KEGIATAN.PROGRAM_KERJA && (

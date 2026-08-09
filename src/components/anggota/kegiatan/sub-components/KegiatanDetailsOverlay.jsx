@@ -3,14 +3,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import AppIcon from "@/components/global/AppIcon";
-import { useDb } from "@/context/DbContext";
 import { useOverlay } from "@/context/ui/OverlayContext";
 import { useCurrentMember } from "@/components/anggota/_shared/useCurrentMember";
+import { db } from "@/lib/firebase-config";
+import {
+  collection,
+  doc,
+  serverTimestamp,
+  writeBatch,
+} from "firebase/firestore";
 import {
   formatDateTime,
   toDate,
 } from "@/components/anggota/_shared/formatters";
 import PilihPesertaKegiatanOverlay from "./PilihPesertaKegiatanOverlay";
+import {
+  uploadProposalCloudinary,
+  validasiFileProposal,
+} from "@/lib/uploadProposalCloudinary";
 
 const STATUS_PROPOSAL = Object.freeze({
   BELUM_DIAJUKAN: "belum_diajukan",
@@ -162,7 +172,6 @@ export function useKegiatanDetailsOverlay() {
 
 export default function KegiatanDetailsModal({ activity, onClose }) {
   const { member } = useCurrentMember();
-  const { addDoc, updateDoc, serverTimestamp } = useDb();
 
   const [visible, setVisible] = useState(false);
   const [selectedProposalFile, setSelectedProposalFile] = useState(null);
@@ -214,8 +223,10 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
     const file = event.target.files?.[0] || null;
     if (!file) return;
 
-    if (file.type && file.type !== "application/pdf") {
-      setError("Proposal harus berupa file PDF.");
+    const validationError = validasiFileProposal(file);
+
+    if (validationError) {
+      setError(validationError);
       event.target.value = "";
       return;
     }
@@ -284,17 +295,39 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
         ? STATUS_PROPOSAL.MENUNGGU_REVIEW
         : proposalState?.status || STATUS_PROPOSAL.MENUNGGU_REVIEW;
 
+      // File baru diupload terlebih dahulu. Firestore hanya menyimpan metadata
+      // dan URL Cloudinary, bukan binary file.
+      const uploadedFile = selectedProposalFile
+        ? await uploadProposalCloudinary(selectedProposalFile)
+        : null;
+
       const proposalPayload = {
         idKegiatan: activity.id,
         idPengunggah: proposalState?.idPengunggah || member.id,
         namaKegiatan: activity.namaKegiatan || "Program Kerja",
         namaFile:
-          selectedProposalFile?.name || proposalState?.namaFile || "proposal.pdf",
+          uploadedFile?.namaFile || proposalState?.namaFile || "proposal.pdf",
         ukuranFileByte:
-          selectedProposalFile?.size ?? proposalState?.ukuranFileByte ?? 0,
-        tipeFile:
-          selectedProposalFile?.type || proposalState?.tipeFile || "application/pdf",
-        versi: isNewFile ? Number(proposalState?.versi || 0) + 1 : Number(proposalState?.versi || 1),
+          uploadedFile?.ukuranFileByte ?? proposalState?.ukuranFileByte ?? 0,
+        tipeFile: uploadedFile?.tipeFile || proposalState?.tipeFile || null,
+        urlFile: uploadedFile?.urlFile || proposalState?.urlFile || null,
+        publicIdFile:
+          uploadedFile?.publicIdFile || proposalState?.publicIdFile || null,
+        assetIdFile:
+          uploadedFile?.assetIdFile || proposalState?.assetIdFile || null,
+        resourceTypeFile:
+          uploadedFile?.resourceTypeFile ||
+          proposalState?.resourceTypeFile ||
+          null,
+        formatFile:
+          uploadedFile?.formatFile || proposalState?.formatFile || null,
+        versionCloudinary:
+          uploadedFile?.versionCloudinary ??
+          proposalState?.versionCloudinary ??
+          null,
+        versi: isNewFile
+          ? Number(proposalState?.versi || 0) + 1
+          : Number(proposalState?.versi || 1),
         status: nextStatus,
         diajukanPada: isNewFile
           ? waktu
@@ -302,18 +335,12 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
         diperbaruiPada: waktu,
         jadwalUsulan: proposalState?.jadwalUsulan || null,
         kepanitiaanUsulan: proposalState?.kepanitiaanUsulan || null,
-        // URL file sengaja dipertahankan bila storage sudah pernah dihubungkan.
-        urlFile: proposalState?.urlFile || null,
       };
 
-      let proposalId = proposalState?.id || null;
-
-      if (proposalId) {
-        await updateDoc("Proposal", proposalId, proposalPayload);
-      } else {
-        const created = await addDoc("Proposal", proposalPayload);
-        proposalId = created.id;
-      }
+      const proposalRef = proposalState?.id
+        ? doc(db, "Proposal", proposalState.id)
+        : doc(collection(db, "Proposal"));
+      const proposalId = proposalRef.id;
 
       const daftarUsulan = selectedParticipants.map(participantSnapshot);
       const usulanPeserta = daftarUsulan.length
@@ -332,12 +359,19 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
           }
         : null;
 
-      await updateDoc("Kegiatan", activity.id, {
+      // Metadata Proposal dan relasi di Kegiatan ditulis atomik agar Firestore
+      // tidak memiliki Proposal tanpa relasi Kegiatan (atau sebaliknya).
+      const batch = writeBatch(db);
+
+      batch.set(proposalRef, proposalPayload, { merge: true });
+      batch.update(doc(db, "Kegiatan", activity.id), {
         idProposal: proposalId,
         statusProposal: nextStatus,
         usulanPeserta,
         diperbaruiPada: waktu,
       });
+
+      await batch.commit();
 
       const nextProposal = {
         id: proposalId,
@@ -502,6 +536,9 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
                         Dokumen Kegiatan
                       </p>
                       <h3 className="font-bold text-text">Proposal Program Kerja</h3>
+                      <p className="mt-1 text-xs text-text-muted">
+                        Format PDF, DOC, atau DOCX · maksimal 10 MB.
+                      </p>
                     </div>
                   </div>
 
@@ -509,7 +546,6 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
                     <input
                       ref={proposalInputRef}
                       type="file"
-                      accept="application/pdf,.pdf"
                       onChange={handleProposalFileChange}
                       className="hidden"
                     />
@@ -559,7 +595,7 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
                             Belum ada Proposal
                           </p>
                           <p className="mt-1 text-xs leading-5 text-red-600">
-                            Pilih file PDF proposal sebelum menyimpan pengajuan.
+                            Pilih file PDF, DOC, atau DOCX sebelum menyimpan pengajuan.
                           </p>
                         </div>
                       </div>
@@ -574,7 +610,7 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
                           {selectedProposalFile.name}
                         </p>
                         <p className="mt-0.5 text-[11px] text-text-muted">
-                          {formatBytes(selectedProposalFile.size) || "PDF dipilih"}
+                          {formatBytes(selectedProposalFile.size) || "File dipilih"}
                         </p>
                       </div>
                       <span className="rounded-full bg-primary/10 px-2.5 py-1 text-[10px] font-bold text-primary">
