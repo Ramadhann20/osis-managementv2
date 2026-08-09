@@ -5,83 +5,51 @@ import { useMemo } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { useDb } from "@/context/DbContext";
 import { useCollection } from "@/hooks/useCollection";
-import { useDoc } from "@/hooks/useDoc";
 
+/**
+ * Mengambil dokumen Anggota milik akun yang sedang login.
+ *
+ * Aturan relasi terbaru:
+ * - Users document.id = Firebase Auth UID.
+ * - Anggota document.id = Firestore Auto ID.
+ * - Anggota.idPengguna = Users document.id.
+ *
+ * Tidak ada lagi pencarian melalui uid/userId/email di dokumen Anggota.
+ */
 export function useCurrentMember() {
   const { user, accessLoading } = useAuth();
   const { colRef, query, where, limit } = useDb();
 
-  const directDocument = useDoc("Anggota", user?.uid, {
-    enabled: Boolean(user?.uid),
-  });
-
-  const byUid = useCollection(
+  const anggotaSaya = useCollection(
     () =>
-      query(
-        colRef("Anggota"),
-        where("uid", "==", user.uid),
-        limit(1)
-      ),
+      user?.uid
+        ? query(
+            colRef("Anggota"),
+            where("idPengguna", "==", user.uid),
+            limit(2)
+          )
+        : null,
     [user?.uid],
     { enabled: Boolean(user?.uid) }
   );
 
-  const byUserId = useCollection(
-    () =>
-      query(
-        colRef("Anggota"),
-        where("userId", "==", user.uid),
-        limit(1)
-      ),
-    [user?.uid],
-    { enabled: Boolean(user?.uid) }
-  );
+  const rows = Array.isArray(anggotaSaya.rows) ? anggotaSaya.rows : [];
+  const member = rows[0] || null;
 
-  const byEmail = useCollection(
-    () =>
-      query(
-        colRef("Anggota"),
-        where("email", "==", user.email),
-        limit(1)
-      ),
-    [user?.email],
-    { enabled: Boolean(user?.email) }
-  );
+  const duplicateError = useMemo(() => {
+    if (rows.length <= 1) return null;
 
-  const member = useMemo(
-    () =>
-      directDocument.data ||
-      byUid.data?.[0] ||
-      byUserId.data?.[0] ||
-      byEmail.data?.[0] ||
-      null,
-    [
-      directDocument.data,
-      byUid.data,
-      byUserId.data,
-      byEmail.data,
-    ]
-  );
-
-  const error =
-    directDocument.error ||
-    byUid.error ||
-    byUserId.error ||
-    byEmail.error ||
-    null;
-
-  const loading =
-    accessLoading ||
-    directDocument.loading ||
-    byUid.loading ||
-    byUserId.loading ||
-    byEmail.loading;
+    return new Error(
+      "Terdapat lebih dari satu dokumen Anggota yang terhubung ke akun ini. Hubungi pembina untuk memperbaiki relasi idPengguna."
+    );
+  }, [rows.length]);
 
   return {
-    user,
     member,
     memberId: member?.id || null,
-    loading,
-    error,
+    loading: accessLoading || anggotaSaya.loading,
+    error: anggotaSaya.error || duplicateError,
   };
 }
+
+export default useCurrentMember;

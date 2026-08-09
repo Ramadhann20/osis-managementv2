@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { doc, writeBatch } from "firebase/firestore";
 
 import AppIcon from "@/components/global/AppIcon";
 import {
@@ -22,22 +23,53 @@ import {
 } from "../konfigurasiDataAnggota";
 import { useDb } from "@/context/DbContext";
 import { useOverlay } from "@/context/ui/OverlayContext";
+import { useCollection } from "@/hooks/useCollection";
 
 function divisionLabel(member) {
   const division = member?.divisi;
 
   if (!division) return "-";
 
-  const code = String(division.kode || "").trim();
   const name = String(division.namaSingkat || division.nama || "").trim();
-
-  if (code && name) return `Sekbid ${code}: ${name}`;
-  return name || code || "-";
+  return name || "-";
 }
 
 function hasValue(value) {
   return value !== undefined && value !== null && String(value).trim() !== "";
 }
+
+function collectionRows(result) {
+  return Array.isArray(result?.rows) ? result.rows : [];
+}
+
+function isBadanPengurusHarian(divisi) {
+  const kode = String(divisi?.kode || "").trim().toUpperCase();
+  const nama = String(divisi?.namaSingkat || divisi?.nama || "")
+    .trim()
+    .toLowerCase();
+
+  return (
+    kode === "BPH" ||
+    nama === "badan pengurus harian" ||
+    nama === "badan pengurus harian osis"
+  );
+}
+
+function labelDivisi(divisi) {
+  return String(divisi?.namaSingkat || divisi?.nama || "-").trim() || "-";
+}
+
+const JABATAN_BPH = Object.freeze([
+  "Ketua",
+  "Wakil",
+  "Sekretaris",
+  "Bendahara",
+]);
+
+const JABATAN_SEKBID = Object.freeze([
+  "Ketua",
+  "Anggota",
+]);
 
 export function useAnggotaDetailOverlay() {
   const { openOverlay, closeOverlay } = useOverlay();
@@ -63,11 +95,16 @@ export function useAnggotaDetailOverlay() {
 }
 
 export default function AnggotaDetailModal({ member, onClose }) {
-  const { updateDoc, serverTimestamp } = useDb();
+  const { db, updateDoc, serverTimestamp } = useDb();
   const { openOverlay, closeOverlay, closeAllOverlays } = useOverlay();
 
   const [savingDecision, setSavingDecision] = useState(null);
   const [decisionError, setDecisionError] = useState("");
+  const [organisasiAktif, setOrganisasiAktif] = useState(() => ({
+    idDivisi: member?.idDivisi || "",
+    jabatanOrganisasi: member?.jabatanOrganisasi || "Anggota",
+    divisi: member?.divisi || null,
+  }));
 
   const attendance = percentage(member?.ringkasan?.persentaseKehadiran);
   const hasAttendance = Boolean(member?.ringkasan);
@@ -98,6 +135,26 @@ export default function AnggotaDetailModal({ member, onClose }) {
     });
   };
 
+  const openOrganisasiPicker = () => {
+    setDecisionError("");
+
+    openOverlay({
+      closeOnBackdrop: true,
+      content: (
+        <OrganisasiPickerModal
+          member={{
+            ...member,
+            idDivisi: organisasiAktif.idDivisi,
+            jabatanOrganisasi: organisasiAktif.jabatanOrganisasi,
+            divisi: organisasiAktif.divisi,
+          }}
+          onSaved={(nextValue) => setOrganisasiAktif(nextValue)}
+          onClose={() => closeOverlay()}
+        />
+      ),
+    });
+  };
+
   const handleReviewDecision = async (nextStatus) => {
     if (!member?.id || savingDecision) return;
 
@@ -113,12 +170,45 @@ export default function AnggotaDetailModal({ member, onClose }) {
           nextStatus === STATUS_KEANGGOTAAN.AKTIF && !member?.bergabungPada,
       });
 
-      await updateDoc(KOLEKSI.ANGGOTA, member.id, payload);
+      if (nextStatus === STATUS_KEANGGOTAAN.AKTIF) {
+        if (!member?.idPengguna) {
+          throw new Error(
+            "Pendaftaran tidak memiliki relasi idPengguna ke collection Users."
+          );
+        }
+
+        // Approval harus konsisten: status Anggota dan role akun diubah
+        // dalam satu batch Firestore. Jika salah satu gagal, keduanya batal.
+        const batch = writeBatch(db);
+
+        batch.update(
+          doc(db, KOLEKSI.ANGGOTA, member.id),
+          payload
+        );
+
+        batch.update(
+          doc(db, "Users", member.idPengguna),
+          {
+            role: "anggota",
+            updatedAt: waktu,
+          }
+        );
+
+        await batch.commit();
+      } else {
+        // Penolakan hanya mengubah status pendaftaran. Role Users tetap
+        // seperti sebelumnya dan tidak diberikan role anggota.
+        await updateDoc(KOLEKSI.ANGGOTA, member.id, payload);
+      }
+
       closeAllOverlays();
     } catch (error) {
       console.error("UPDATE MEMBER REVIEW ERROR:", error);
       setDecisionError(
-        "Status pendaftaran belum berhasil diubah. Periksa koneksi dan izin Firestore."
+        error?.message ===
+          "Pendaftaran tidak memiliki relasi idPengguna ke collection Users."
+          ? "Pendaftaran ini belum terhubung ke akun pengguna. Pastikan field idPengguna tersimpan sebelum menerima pendaftaran."
+          : "Status pendaftaran belum berhasil diubah. Periksa koneksi dan izin Firestore."
       );
     } finally {
       setSavingDecision(null);
@@ -139,7 +229,7 @@ export default function AnggotaDetailModal({ member, onClose }) {
               {member?.namaLengkap || "-"}
             </h2>
             <p className="mt-1 text-sm text-text-muted">
-              {member?.jabatanOrganisasi || "Anggota"}
+              {organisasiAktif.jabatanOrganisasi || "Anggota"}
             </p>
           </div>
         </div>
@@ -173,15 +263,32 @@ export default function AnggotaDetailModal({ member, onClose }) {
             <DetailItem label="Kelas" value={member?.namaKelas || "-"} />
             <DetailItem
               label="Jabatan"
-              value={member?.jabatanOrganisasi || "Anggota"}
+              value={organisasiAktif.jabatanOrganisasi || "Anggota"}
             />
-            <DetailItem label="Divisi / Sekbid" value={divisionLabel(member)} />
+            <DetailItem
+              label="Divisi / Sekbid"
+              value={labelDivisi(organisasiAktif.divisi)}
+            />
             <DetailItem label="Periode" value={member?.periodeData?.namaPeriode || "-"} />
             <DetailItem
               label="Tanggal bergabung"
               value={formatDate(member?.bergabungPada)}
             />
           </div>
+
+          {canChangeOfficialStatus && (
+            <button
+              type="button"
+              onClick={openOrganisasiPicker}
+              className="mt-3 inline-flex min-h-11 w-full items-center justify-between gap-3 rounded-xl border border-primary/30 bg-primary/5 px-4 text-sm font-bold text-primary transition hover:border-primary/60 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
+            >
+              <span className="inline-flex items-center gap-2">
+                <AppIcon name="manage_accounts" size={20} />
+                Ubah Sekbid / Jabatan
+              </span>
+              <AppIcon name="chevron_right" size={20} />
+            </button>
+          )}
         </DetailSection>
 
         {contactItems.length > 0 && (
@@ -293,6 +400,269 @@ export default function AnggotaDetailModal({ member, onClose }) {
             )}
           </section>
         )}
+      </div>
+    </section>
+  );
+}
+
+function OrganisasiPickerModal({ member, onSaved, onClose }) {
+  const { colRef, updateDoc, serverTimestamp } = useDb();
+
+  const divisi = useCollection(() => colRef(KOLEKSI.DIVISI), [], {
+    enabled: true,
+  });
+
+  const [idDivisi, setIdDivisi] = useState(member?.idDivisi || "");
+  const [jabatan, setJabatan] = useState(
+    member?.jabatanOrganisasi || "Anggota"
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const daftarDivisi = useMemo(
+    () =>
+      [...collectionRows(divisi)].sort((a, b) =>
+        labelDivisi(a).localeCompare(labelDivisi(b), "id")
+      ),
+    [divisi]
+  );
+
+  const divisiTerpilih = useMemo(
+    () => daftarDivisi.find((item) => item.id === idDivisi) || null,
+    [daftarDivisi, idDivisi]
+  );
+
+  const opsiJabatan = isBadanPengurusHarian(divisiTerpilih)
+    ? JABATAN_BPH
+    : JABATAN_SEKBID;
+
+  const handlePilihDivisi = (nextIdDivisi) => {
+    const nextDivisi =
+      daftarDivisi.find((item) => item.id === nextIdDivisi) || null;
+    const nextOpsi = isBadanPengurusHarian(nextDivisi)
+      ? JABATAN_BPH
+      : JABATAN_SEKBID;
+
+    setIdDivisi(nextIdDivisi);
+    setJabatan((current) =>
+      nextOpsi.includes(current)
+        ? current
+        : isBadanPengurusHarian(nextDivisi)
+          ? "Ketua"
+          : "Anggota"
+    );
+    setError("");
+  };
+
+  const handleSimpan = async () => {
+    if (!member?.id || saving) return;
+
+    if (!idDivisi || !divisiTerpilih) {
+      setError("Pilih Sekbid atau Badan Pengurus Harian terlebih dahulu.");
+      return;
+    }
+
+    if (!opsiJabatan.includes(jabatan)) {
+      setError("Jabatan yang dipilih tidak sesuai dengan divisi.");
+      return;
+    }
+
+    const tidakBerubah =
+      idDivisi === member?.idDivisi &&
+      jabatan === (member?.jabatanOrganisasi || "Anggota");
+
+    if (tidakBerubah) {
+      onClose?.();
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+
+    try {
+      await updateDoc(KOLEKSI.ANGGOTA, member.id, {
+        idDivisi,
+        jabatanOrganisasi: jabatan,
+        diperbaruiPada: serverTimestamp(),
+      });
+
+      onSaved?.({
+        idDivisi,
+        jabatanOrganisasi: jabatan,
+        divisi: divisiTerpilih,
+      });
+      onClose?.();
+    } catch (updateError) {
+      console.error("UPDATE ORGANISASI ANGGOTA ERROR:", updateError);
+      setError(
+        "Sekbid atau jabatan belum berhasil diubah. Periksa koneksi dan izin Firestore."
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="w-full max-w-lg overflow-hidden rounded-3xl border border-border bg-card shadow-2xl">
+      <header className="flex items-start justify-between gap-4 border-b border-border p-5 sm:p-6">
+        <div className="min-w-0">
+          <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">
+            Organisasi Anggota
+          </p>
+          <h2 className="mt-1 text-xl font-bold text-text">
+            Ubah Sekbid / Jabatan
+          </h2>
+          <p className="mt-2 text-sm leading-6 text-text-muted">
+            Atur penempatan organisasi untuk{" "}
+            <span className="font-semibold text-text">
+              {member?.namaLengkap || "anggota ini"}
+            </span>
+            .
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Tutup pengaturan organisasi"
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-input text-text-muted transition hover:bg-error-bg hover:text-error-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        >
+          <AppIcon name="close" size={21} />
+        </button>
+      </header>
+
+      <div className="space-y-5 p-5 sm:p-6">
+        {error && (
+          <div
+            role="alert"
+            className="rounded-2xl bg-error-bg px-4 py-3 text-sm font-medium text-error-text"
+          >
+            {error}
+          </div>
+        )}
+
+        {divisi.error && (
+          <div
+            role="alert"
+            className="rounded-2xl bg-error-bg px-4 py-3 text-sm font-medium text-error-text"
+          >
+            Data divisi tidak dapat dimuat.
+          </div>
+        )}
+
+        <div>
+          <label
+            htmlFor="ubah-divisi-anggota"
+            className="mb-2 block text-xs font-bold uppercase tracking-[0.08em] text-text-muted"
+          >
+            Sekbid / Divisi
+          </label>
+
+          <div className="relative">
+            <select
+              id="ubah-divisi-anggota"
+              value={idDivisi}
+              disabled={saving || divisi.loading}
+              onChange={(event) => handlePilihDivisi(event.target.value)}
+              className="min-h-12 w-full appearance-none rounded-xl border border-border bg-card px-4 pr-11 text-sm font-semibold text-text outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <option value="">
+                {divisi.loading ? "Memuat divisi..." : "Pilih divisi"}
+              </option>
+
+              {daftarDivisi.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {labelDivisi(item)}
+                </option>
+              ))}
+            </select>
+
+            <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-text-muted">
+              <AppIcon name="expand_more" size={21} />
+            </span>
+          </div>
+        </div>
+
+        <div>
+          <p className="mb-2 text-xs font-bold uppercase tracking-[0.08em] text-text-muted">
+            Jabatan
+          </p>
+
+          <div className="grid grid-cols-2 gap-2">
+            {opsiJabatan.map((item) => {
+              const aktif = jabatan === item;
+
+              return (
+                <button
+                  key={item}
+                  type="button"
+                  disabled={saving || !idDivisi}
+                  onClick={() => {
+                    setJabatan(item);
+                    setError("");
+                  }}
+                  className={`min-h-11 rounded-xl border px-3 text-sm font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-50 ${
+                    aktif
+                      ? "border-primary bg-primary text-white"
+                      : "border-border bg-card text-text hover:border-primary/50 hover:bg-surface"
+                  }`}
+                >
+                  {item}
+                </button>
+              );
+            })}
+          </div>
+
+          <p className="mt-2 text-xs leading-5 text-text-muted">
+            {isBadanPengurusHarian(divisiTerpilih)
+              ? "Badan Pengurus Harian menggunakan jabatan Ketua, Wakil, Sekretaris, atau Bendahara."
+              : "Pada Sekbid, Ketua tetap ditulis sebagai “Ketua”. Identitas Sekbid ditentukan dari divisinya."}
+          </p>
+        </div>
+
+        <div className="rounded-2xl border border-border bg-surface p-4">
+          <p className="text-xs font-semibold text-text-muted">
+            Penempatan baru
+          </p>
+          <div className="mt-2 flex items-start gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <AppIcon name="badge" size={20} />
+            </span>
+            <div className="min-w-0">
+              <p className="font-bold text-text">{jabatan || "-"}</p>
+              <p className="mt-0.5 break-words text-sm text-text-muted">
+                {divisiTerpilih ? labelDivisi(divisiTerpilih) : "Belum memilih divisi"}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <button
+            type="button"
+            disabled={saving}
+            onClick={onClose}
+            className="min-h-11 rounded-xl border border-border px-5 text-sm font-bold text-text transition hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            Batal
+          </button>
+
+          <button
+            type="button"
+            disabled={
+              saving ||
+              divisi.loading ||
+              Boolean(divisi.error) ||
+              !idDivisi ||
+              !divisiTerpilih
+            }
+            onClick={handleSimpan}
+            className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-bold text-white transition hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <AppIcon name={saving ? "hourglass_top" : "save"} size={19} />
+            {saving ? "Menyimpan..." : "Simpan Perubahan"}
+          </button>
+        </div>
       </div>
     </section>
   );

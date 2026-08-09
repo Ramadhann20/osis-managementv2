@@ -5,14 +5,20 @@ import { useMemo, useState } from "react";
 import AppIcon from "@/components/global/AppIcon";
 import { useDb } from "@/context/DbContext";
 import { useCollection } from "@/hooks/useCollection";
+import AksesOrganisasi, {
+  ATURAN_AKSES_ORGANISASI,
+} from "@/components/anggota/_shared/AksesOrganisasi";
+import {
+  useAjukanRapatOverlay,
+} from "./sub-components/AjukanRapatOverlay";
+import {
+  useKegiatanDetailsOverlay,
+} from "./sub-components/KegiatanDetailsOverlay";
 import {
   formatDateTime,
-  sortByDateDescending,
   toDate,
 } from "@/components/anggota/_shared/formatters";
 import {
-  ActivityStatusBadge,
-  DisabledAction,
   EmptyState,
   PageError,
   PageHeading,
@@ -20,68 +26,147 @@ import {
   StatCard,
 } from "@/components/anggota/_shared/Ui";
 
+const STATUS_KEGIATAN = Object.freeze({
+  DRAF: "draf",
+  TERENCANA: "terencana",
+  AKAN_DATANG: "akan_datang",
+  BERLANGSUNG: "berlangsung",
+  SELESAI: "selesai",
+  DIBATALKAN: "dibatalkan",
+});
+
+function rowsOf(result) {
+  return Array.isArray(result?.rows) ? result.rows : [];
+}
+
+function sortKegiatanTerbaru(rows) {
+  return [...rows].sort((a, b) => {
+    const waktuA = toDate(a?.waktuMulai)?.getTime() || 0;
+    const waktuB = toDate(b?.waktuMulai)?.getTime() || 0;
+    return waktuB - waktuA;
+  });
+}
+
+function labelDivisi(divisi) {
+  return divisi?.namaSingkat || divisi?.nama || "Pengurus OSIS";
+}
+
+function labelJenisKegiatan(value) {
+  return (
+    {
+      program_kerja: "Program Kerja",
+      rapat: "Rapat",
+    }[value] ||
+    value ||
+    "-"
+  );
+}
+
+function labelStatusJadwal(status) {
+  return (
+    {
+      direncanakan: "Direncanakan",
+      difinalisasi: "Sudah Ditetapkan",
+    }[status] || "Belum ditetapkan"
+  );
+}
+
+function formatDuration(activity) {
+  const storedMinutes = Number(activity?.durasiMenit);
+  let minutes = Number.isFinite(storedMinutes) && storedMinutes > 0
+    ? storedMinutes
+    : 0;
+
+  if (!minutes) {
+    const start = toDate(activity?.waktuMulai);
+    const end = toDate(activity?.waktuSelesai);
+
+    if (start && end) {
+      const diff = Math.round((end.getTime() - start.getTime()) / 60000);
+      minutes = diff > 0 ? diff : 0;
+    }
+  }
+
+  if (!minutes) return "Belum tersedia";
+
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  const parts = [];
+
+  if (hours) parts.push(`${hours} jam`);
+  if (rest) parts.push(`${rest} menit`);
+
+  return parts.join(" ");
+}
+
 export default function KegiatanAnggota() {
   const { colRef } = useDb();
+  const { openAjukanRapat } = useAjukanRapatOverlay();
+  const { openKegiatanDetails } = useKegiatanDetailsOverlay();
 
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
 
-  const activities = useCollection(
-    () => colRef("Kegiatan"),
-    [],
-    { enabled: true }
-  );
+  const activities = useCollection(() => colRef("Kegiatan"), [], {
+    enabled: true,
+  });
 
-  const divisions = useCollection(
-    () => colRef("Divisi"),
-    [],
-    { enabled: true }
-  );
+  const divisions = useCollection(() => colRef("Divisi"), [], {
+    enabled: true,
+  });
 
-  const proposals = useCollection(
-    () => colRef("Proposal"),
-    [],
-    { enabled: true }
-  );
+  const proposals = useCollection(() => colRef("Proposal"), [], {
+    enabled: true,
+  });
 
   const loading =
-    activities.loading ||
-    divisions.loading ||
-    proposals.loading;
+    activities.loading || divisions.loading || proposals.loading;
 
-  const error =
-    activities.error ||
-    divisions.error ||
-    proposals.error;
+  const error = activities.error || divisions.error || proposals.error;
 
   const data = useMemo(() => {
     const divisionMap = new Map(
-      (divisions.data || []).map((item) => [item.id, item])
-    );
-    const proposalMap = new Map(
-      (proposals.data || []).map((item) => [item.id, item])
+      rowsOf(divisions).map((item) => [item.id, item])
     );
 
-    const all = sortByDateDescending(
-      activities.data || [],
-      "startAt"
-    ).map((activity) => ({
+    const proposalRows = rowsOf(proposals);
+    const proposalMap = new Map(
+      proposalRows.map((item) => [item.id, item])
+    );
+    const proposalByKegiatanMap = new Map(
+      proposalRows
+        .filter((item) => item?.idKegiatan)
+        .map((item) => [item.idKegiatan, item])
+    );
+
+    // Draf tidak ditampilkan pada halaman Anggota.
+    // Pengajuan rapat/program kerja tetap tersimpan di collection Kegiatan,
+    // tetapi baru muncul di daftar ini setelah menjadi kegiatan resmi.
+    const all = sortKegiatanTerbaru(rowsOf(activities))
+      .filter((activity) => activity.status !== STATUS_KEGIATAN.DRAF)
+      .map((activity) => ({
       ...activity,
-      division: divisionMap.get(activity.divisionId) || null,
-      proposal: proposalMap.get(activity.proposalId) || null,
+      divisi: activity.idDivisi
+        ? divisionMap.get(activity.idDivisi) || null
+        : null,
+      proposal: activity.idProposal
+        ? proposalMap.get(activity.idProposal) ||
+          proposalByKegiatanMap.get(activity.id) ||
+          null
+        : proposalByKegiatanMap.get(activity.id) || null,
     }));
 
+    const keyword = search.trim().toLowerCase();
+
     const filtered = all.filter((activity) => {
-      const keyword = search.trim().toLowerCase();
       const matchesSearch =
         !keyword ||
-        activity.title?.toLowerCase().includes(keyword) ||
-        activity.location?.toLowerCase().includes(keyword) ||
-        activity.description?.toLowerCase().includes(keyword);
+        String(activity.namaKegiatan || "").toLowerCase().includes(keyword) ||
+        String(activity.lokasi || "").toLowerCase().includes(keyword) ||
+        String(activity.deskripsi || "").toLowerCase().includes(keyword);
 
       const matchesStatus =
-        statusFilter === "all" ||
-        activity.status === statusFilter;
+        statusFilter === "all" || activity.status === statusFilter;
 
       return matchesSearch && matchesStatus;
     });
@@ -90,29 +175,23 @@ export default function KegiatanAnggota() {
       all,
       filtered,
       upcoming: all.filter(
-        (item) => item.status === "upcoming"
+        (item) => item.status === STATUS_KEGIATAN.AKAN_DATANG
       ).length,
       ongoing: all.filter(
-        (item) => item.status === "ongoing"
+        (item) => item.status === STATUS_KEGIATAN.BERLANGSUNG
       ).length,
       completed: all.filter(
-        (item) => item.status === "completed"
+        (item) => item.status === STATUS_KEGIATAN.SELESAI
       ).length,
     };
-  }, [
-    activities.data,
-    divisions.data,
-    proposals.data,
-    search,
-    statusFilter,
-  ]);
+  }, [activities, divisions, proposals, search, statusFilter]);
 
   if (loading) {
     return <PageLoading message="Memuat kegiatan OSIS..." />;
   }
 
   if (error) {
-    return <PageError />;
+    return <PageError message={error.message} />;
   }
 
   return (
@@ -120,11 +199,27 @@ export default function KegiatanAnggota() {
       <PageHeading
         eyebrow="Agenda Organisasi"
         title="Kegiatan OSIS"
-        description="Daftar rapat, program kerja, workshop, dan kegiatan sekolah."
+        description="Daftar program kerja dan rapat OSIS berdasarkan jadwal yang tersimpan."
         action={
-          <DisabledAction icon="event_available">
-            Ajukan Kegiatan
-          </DisabledAction>
+          <AksesOrganisasi
+            aturan={ATURAN_AKSES_ORGANISASI.PIMPINAN_ORGANISASI}
+          >
+            {(akses) => (
+              <button
+                type="button"
+                onClick={() =>
+                  openAjukanRapat({
+                    member: akses.member,
+                    divisi: akses.divisi,
+                  })
+                }
+                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-bold text-white transition hover:bg-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
+              >
+                <AppIcon name="add" size={19} />
+                Ajukan Rapat
+              </button>
+            )}
+          </AksesOrganisasi>
         }
       />
 
@@ -133,7 +228,7 @@ export default function KegiatanAnggota() {
           icon="calendar_month"
           label="Total Kegiatan"
           value={data.all.length}
-          helper="Seluruh kegiatan pada database."
+          helper="Seluruh agenda OSIS yang tercatat."
         />
         <StatCard
           icon="event_available"
@@ -153,7 +248,7 @@ export default function KegiatanAnggota() {
           icon="check"
           label="Selesai"
           value={data.completed}
-          helper="Kegiatan yang telah ditutup."
+          helper="Kegiatan yang telah selesai."
           accent="green"
         />
       </section>
@@ -161,9 +256,7 @@ export default function KegiatanAnggota() {
       <section className="mt-7">
         <div className="mb-5 flex flex-col gap-4 rounded-2xl border border-border bg-card p-5 shadow-sm md:flex-row md:items-center md:justify-between">
           <div>
-            <h2 className="font-bold text-text">
-              Daftar Kegiatan
-            </h2>
+            <h2 className="font-bold text-text">Daftar Kegiatan</h2>
             <p className="mt-1 text-xs text-text-muted">
               {data.filtered.length} kegiatan ditampilkan.
             </p>
@@ -187,17 +280,15 @@ export default function KegiatanAnggota() {
 
             <select
               value={statusFilter}
-              onChange={(event) =>
-                setStatusFilter(event.target.value)
-              }
+              onChange={(event) => setStatusFilter(event.target.value)}
               className="min-h-11 rounded-xl border border-border bg-input px-4 text-sm text-text outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
             >
               <option value="all">Semua Status</option>
-              <option value="draft">Draf</option>
-              <option value="upcoming">Akan Datang</option>
-              <option value="ongoing">Berlangsung</option>
-              <option value="completed">Selesai</option>
-              <option value="cancelled">Dibatalkan</option>
+              <option value={STATUS_KEGIATAN.TERENCANA}>Terencana</option>
+              <option value={STATUS_KEGIATAN.AKAN_DATANG}>Akan Datang</option>
+              <option value={STATUS_KEGIATAN.BERLANGSUNG}>Berlangsung</option>
+              <option value={STATUS_KEGIATAN.SELESAI}>Selesai</option>
+              <option value={STATUS_KEGIATAN.DIBATALKAN}>Dibatalkan</option>
             </select>
           </div>
         </div>
@@ -214,6 +305,7 @@ export default function KegiatanAnggota() {
               <ActivityCard
                 key={activity.id}
                 activity={activity}
+                onDetail={() => openKegiatanDetails(activity)}
               />
             ))}
           </div>
@@ -223,11 +315,13 @@ export default function KegiatanAnggota() {
   );
 }
 
-function ActivityCard({ activity }) {
-  const startDate = toDate(activity.startAt);
+function ActivityCard({ activity, onDetail }) {
+  const startDate = toDate(activity.waktuMulai);
+  const isMeeting = activity.jenisKegiatan === "rapat";
+  const proposal = activity.proposal || null;
 
   return (
-    <article className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
+    <article className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm transition duration-300 hover:-translate-y-0.5 hover:shadow-md">
       <div className="flex items-start justify-between gap-4 border-b border-border p-5">
         <div className="flex min-w-0 items-start gap-4">
           <div className="flex h-14 w-14 shrink-0 flex-col items-center justify-center rounded-2xl bg-primary text-white">
@@ -250,20 +344,26 @@ function ActivityCard({ activity }) {
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="font-bold text-text">
-                {activity.title}
+                {activity.namaKegiatan || "Kegiatan tanpa nama"}
               </h2>
-              <ActivityStatusBadge status={activity.status} />
+              <KegiatanStatusBadge status={activity.status} />
             </div>
+
+            <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-bold uppercase tracking-wider text-text-muted">
+              <span>{labelJenisKegiatan(activity.jenisKegiatan)}</span>
+            </div>
+
             <p className="mt-2 line-clamp-2 text-sm leading-6 text-text-muted">
-              {activity.description || "Tidak ada deskripsi."}
+              {activity.deskripsi || "Tidak ada deskripsi."}
             </p>
           </div>
         </div>
 
         <button
           type="button"
-          disabled
-          className="rounded-lg p-2 text-text-muted opacity-60"
+          onClick={onDetail}
+          aria-label="Lihat detail kegiatan"
+          className="rounded-lg p-2 text-text-muted transition hover:bg-surface hover:text-primary"
         >
           <AppIcon name="more_vert" size={20} />
         </button>
@@ -271,48 +371,65 @@ function ActivityCard({ activity }) {
 
       <div className="grid grid-cols-1 gap-4 p-5 sm:grid-cols-2">
         <MetaItem
-          label="Waktu"
-          value={formatDateTime(activity.startAt)}
+          label={isMeeting ? "Waktu Rapat" : "Waktu Pelaksanaan"}
+          value={formatDateTime(activity.waktuMulai)}
         />
-        <MetaItem
-          label="Lokasi"
-          value={activity.location || "-"}
-        />
-        <MetaItem
-          label="Penyelenggara"
-          value={
-            activity.division
-              ? `Sekbid ${activity.division.code}: ${activity.division.shortName}`
-              : "Pengurus Inti OSIS"
-          }
-        />
-        <MetaItem
-          label="Peserta"
-          value={`${activity.participantCount || 0}/${
-            activity.participantCapacity || "-"
-          } peserta`}
-        />
+        <MetaItem label="Lokasi" value={activity.lokasi || "-"} />
+        <MetaItem label="Penyelenggara" value={labelDivisi(activity.divisi)} />
+        {isMeeting ? (
+          <MetaItem label="Durasi" value={formatDuration(activity)} />
+        ) : (
+          <MetaItem
+            label="Jadwal"
+            value={labelStatusJadwal(activity.statusJadwal)}
+          />
+        )}
       </div>
 
-      <div className="flex flex-col gap-3 border-t border-border bg-surface px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-xs text-text-muted">
-          Proposal:{" "}
-          <span className="font-semibold text-text">
-            {activity.proposal
-              ? activity.proposal.status
-              : "Tidak terhubung"}
-          </span>
-        </p>
+      <div className={`flex flex-col gap-3 border-t border-border bg-surface px-5 py-4 sm:flex-row sm:items-center ${isMeeting ? "sm:justify-end" : "sm:justify-between"}`}>
+        {!isMeeting && (
+          <p className="min-w-0 text-xs text-text-muted">
+            Proposal:{" "}
+            {proposal ? (
+              <span
+                className="inline-block max-w-[260px] truncate align-bottom font-semibold text-text"
+                title={proposal.namaFile || "File proposal"}
+              >
+                {proposal.namaFile || "File proposal"}
+              </span>
+            ) : (
+              <span className="font-bold text-red-600">Belum ada Proposal</span>
+            )}
+          </p>
+        )}
 
-        <DisabledAction
-          icon="chevron_right"
-          variant="outline"
-          className="sm:min-w-32"
+        <button
+          type="button"
+          onClick={onDetail}
+          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-border bg-card px-4 text-sm font-semibold text-text transition duration-300 hover:border-primary/40 hover:bg-primary/5 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 sm:min-w-32"
         >
           Detail
-        </DisabledAction>
+          <AppIcon name="chevron_right" size={18} />
+        </button>
       </div>
     </article>
+  );
+}
+
+function KegiatanStatusBadge({ status }) {
+  const config = {
+    draf: ["Draf", "bg-slate-100 text-slate-700"],
+    terencana: ["Terencana", "bg-blue-50 text-blue-700"],
+    akan_datang: ["Akan Datang", "bg-sky-50 text-sky-700"],
+    berlangsung: ["Berlangsung", "bg-amber-50 text-amber-700"],
+    selesai: ["Selesai", "bg-emerald-50 text-emerald-700"],
+    dibatalkan: ["Dibatalkan", "bg-red-50 text-red-700"],
+  }[status] || [status || "-", "bg-slate-100 text-slate-700"];
+
+  return (
+    <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${config[1]}`}>
+      {config[0]}
+    </span>
   );
 }
 
@@ -323,7 +440,7 @@ function MetaItem({ label, value }) {
         {label}
       </p>
       <p className="mt-1 text-sm font-semibold leading-6 text-text">
-        {value}
+        {value || "-"}
       </p>
     </div>
   );

@@ -25,29 +25,10 @@ function isBoardDivision(division) {
   );
 
   return [
-    "badan pengurus",
-    "pengurus inti",
-    "inti",
-    "bp",
+    "badan pengurus harian",
+    "badan pengurus harian osis",
+    "bph",
   ].includes(divisionName);
-}
-
-function isCoreBoardPosition(position) {
-  const value = normalizeText(position);
-
-  if (!value) return false;
-
-  // Ketua Sekbid tidak dianggap sebagai Ketua Badan Pengurus.
-  if (/^ketua\s+(sekbid|seksi bidang|divisi)\b/.test(value)) {
-    return false;
-  }
-
-  return (
-    /^ketua(?:\s+(osis|umum))?$/.test(value) ||
-    /^wakil\s+ketua\b/.test(value) ||
-    /^sekretaris\b/.test(value) ||
-    /^bendahara\b/.test(value)
-  );
 }
 
 function numericSuffixRank(value) {
@@ -64,7 +45,7 @@ function boardRoleRank(position) {
   const value = normalizeText(position);
 
   if (/^ketua(?:\s+(osis|umum))?$/.test(value)) return 0;
-  if (/^wakil\s+ketua\b/.test(value)) return 10 + numericSuffixRank(value);
+  if (/^wakil(?:\s+ketua)?$/.test(value)) return 10 + numericSuffixRank(value);
   if (/^sekretaris\b/.test(value)) return 20 + numericSuffixRank(value);
   if (/^bendahara\b/.test(value)) return 30 + numericSuffixRank(value);
 
@@ -84,10 +65,9 @@ function sekbidRoleRank(position) {
 }
 
 export function isBadanPengurus(member) {
-  return (
-    isBoardDivision(member?.divisi) ||
-    isCoreBoardPosition(member?.jabatanOrganisasi)
-  );
+  // Keanggotaan Badan Pengurus Harian ditentukan HANYA dari relasi divisi.
+  // Jabatan "Ketua" pada sekbid tetap masuk ke daftar/filter sekbid.
+  return isBoardDivision(member?.divisi);
 }
 
 export function isBadanPengurusDivision(division) {
@@ -140,7 +120,7 @@ export default function BadanPengurusSection({ members = [] }) {
           </div>
 
           <div>
-            <h2 className="font-bold text-text">Badan Pengurus</h2>
+            <h2 className="font-bold text-text">Badan Pengurus Harian</h2>
             <p className="mt-1 text-xs leading-5 text-text-muted">
               Ketua, wakil ketua, sekretaris, dan bendahara OSIS.
             </p>
@@ -180,7 +160,7 @@ export default function BadanPengurusSection({ members = [] }) {
                   {member.namaLengkap || "-"}
                 </p>
                 <p className="mt-1 text-xs font-semibold text-primary">
-                  {member.jabatanOrganisasi || "Badan Pengurus"}
+                  {member.jabatanOrganisasi || "Badan Pengurus Harian"}
                 </p>
               </div>
             </div>

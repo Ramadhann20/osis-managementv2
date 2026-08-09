@@ -128,7 +128,7 @@ export default function DataAnggotaPembina() {
       (item) => !isBadanPengurus(item)
     );
 
-    // Badan Pengurus selalu ditampilkan secara utuh dan tidak ikut
+    // Badan Pengurus Harian selalu ditampilkan secara utuh dan tidak ikut
     // terpengaruh pencarian maupun filter sekbid, status, dan periode.
     const boardMembers = sortBadanPengurus(allBoardMembers);
 
@@ -145,7 +145,7 @@ export default function DataAnggotaPembina() {
     // Anggota selain Ketua Sekbid mengikuti urutan dari sortSekbidMembers.
     const filtered = sortSekbidMembers(filteredSekbidMembers);
 
-    // Badan Pengurus tidak ditampilkan pada dropdown Sekbid.
+    // Badan Pengurus Harian tidak ditampilkan pada dropdown Sekbid.
     const sekbidRows = divisionRows.filter(
       (division) => !isBadanPengurusDivision(division)
     );
@@ -228,7 +228,7 @@ export default function DataAnggotaPembina() {
           icon="badge"
           label="Divisi / Sekbid"
           value={data.divisionTotal}
-          helper="Termasuk Badan Pengurus"
+          helper="Termasuk Badan Pengurus Harian"
           accent="blue"
         />
         <StatCard
@@ -277,7 +277,7 @@ export default function DataAnggotaPembina() {
               <option value="all">Semua Sekbid</option>
               {data.sekbidRows.map((division) => (
                 <option key={division.id} value={division.id}>
-                  Sekbid {division.kode} - {division.namaSingkat}
+                  {division.namaSingkat || division.nama || "-"}
                 </option>
               ))}
             </select>
@@ -364,7 +364,7 @@ export default function DataAnggotaPembina() {
                       </p>
                       <p className="mt-1 text-xs text-text-muted">
                         {member.divisi
-                          ? `Sekbid ${member.divisi.kode}: ${member.divisi.namaSingkat}`
+                          ? (member.divisi.namaSingkat || member.divisi.nama || "-")
                           : "Belum memiliki sekbid"}
                       </p>
                     </td>

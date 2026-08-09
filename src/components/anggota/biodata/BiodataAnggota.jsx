@@ -10,52 +10,96 @@ import {
   formatDate,
   formatPhone,
   getInitials,
-  getMembershipStatusLabel,
 } from "@/components/anggota/_shared/formatters";
 import {
   DisabledAction,
-  EmptyState,
   PageError,
   PageHeading,
   PageLoading,
   SectionTitle,
 } from "@/components/anggota/_shared/Ui";
 
+const LABEL_STATUS_KEANGGOTAAN = Object.freeze({
+  menunggu_review: "Menunggu Review",
+  aktif: "Aktif",
+  nonaktif: "Tidak Aktif",
+  ditangguhkan: "Ditangguhkan",
+  ditolak: "Ditolak",
+});
+
+function rowsOf(result) {
+  return Array.isArray(result?.rows) ? result.rows : [];
+}
+
+function labelStatus(status) {
+  return LABEL_STATUS_KEANGGOTAAN[status] || status || "-";
+}
+
+function labelDivisi(divisi) {
+  return divisi?.namaSingkat || divisi?.nama || "Belum ditentukan";
+}
+
+function labelJenisKelamin(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+
+  if (["laki-laki", "laki_laki", "male", "l"].includes(normalized)) {
+    return "Laki-laki";
+  }
+
+  if (["perempuan", "female", "p"].includes(normalized)) {
+    return "Perempuan";
+  }
+
+  return value || "-";
+}
+
 export default function BiodataAnggota() {
-  const { member, loading: memberLoading, error: memberError } =
-    useCurrentMember();
+  const {
+    member,
+    loading: memberLoading,
+    error: memberError,
+  } = useCurrentMember();
+
   const { colRef } = useDb();
 
-  const divisions = useCollection(
-    () => colRef("Divisi"),
-    [],
-    { enabled: true }
-  );
+  const divisions = useCollection(() => colRef("Divisi"), [], {
+    enabled: true,
+  });
 
-  const loading = memberLoading || divisions.loading;
-  const error = memberError || divisions.error;
+  const periods = useCollection(() => colRef("Periode"), [], {
+    enabled: true,
+  });
 
-  const division = useMemo(
-    () =>
-      (divisions.data || []).find(
-        (item) => item.id === member?.divisionId
-      ) || null,
-    [divisions.data, member?.divisionId]
-  );
+  const loading = memberLoading || divisions.loading || periods.loading;
+  const error = memberError || divisions.error || periods.error;
+
+  const data = useMemo(() => {
+    const divisionMap = new Map(
+      rowsOf(divisions).map((item) => [item.id, item])
+    );
+    const periodMap = new Map(rowsOf(periods).map((item) => [item.id, item]));
+
+    return {
+      division: member?.idDivisi
+        ? divisionMap.get(member.idDivisi) || null
+        : null,
+      period: member?.idPeriode ? periodMap.get(member.idPeriode) || null : null,
+    };
+  }, [divisions, periods, member?.idDivisi, member?.idPeriode]);
 
   if (loading) {
     return <PageLoading message="Memuat biodata anggota..." />;
   }
 
   if (error) {
-    return <PageError />;
+    return <PageError message={error.message} />;
   }
 
   if (!member) {
     return (
       <PageError
         title="Biodata anggota tidak ditemukan"
-        message="Pastikan dokumen Anggota terhubung dengan akun yang sedang login."
+        message="Pastikan dokumen Anggota terhubung dengan akun login melalui field idPengguna."
       />
     );
   }
@@ -71,9 +115,7 @@ export default function BiodataAnggota() {
             <DisabledAction icon="arrow_back" variant="outline">
               Kembali
             </DisabledAction>
-            <DisabledAction icon="edit">
-              Edit Data
-            </DisabledAction>
+            <DisabledAction icon="edit">Edit Data</DisabledAction>
           </div>
         }
       />
@@ -83,38 +125,40 @@ export default function BiodataAnggota() {
 
         <div className="relative flex flex-col items-center gap-6 md:flex-row">
           <div className="flex h-28 w-28 shrink-0 items-center justify-center rounded-3xl bg-primary/10 text-3xl font-bold text-primary">
-            {getInitials(member.fullName)}
+            {getInitials(member.namaLengkap)}
           </div>
 
           <div className="flex-1 text-center md:text-left">
-            <div className="flex flex-col items-center gap-3 md:flex-row">
+            <div className="flex flex-col items-center gap-3 md:flex-row md:flex-wrap">
               <h1 className="text-2xl font-bold text-text">
-                {member.fullName}
+                {member.namaLengkap || "Anggota"}
               </h1>
+
               <span className="rounded-full bg-primary/10 px-3 py-1 text-xs font-bold text-primary">
                 NIS: {member.nis || "-"}
               </span>
+
+              {member.kodeAnggota && (
+                <span className="rounded-full border border-border bg-surface px-3 py-1 text-xs font-bold text-text-muted">
+                  {member.kodeAnggota}
+                </span>
+              )}
             </div>
 
             <p className="mt-2 text-base font-semibold text-primary">
-              {member.organisationPosition || "Anggota OSIS"}
-              {division ? ` (${division.shortName})` : ""}
+              {member.jabatanOrganisasi || "Anggota"}
+              {data.division ? ` · ${labelDivisi(data.division)}` : ""}
             </p>
 
             <div className="mt-4 flex flex-wrap justify-center gap-3 md:justify-start">
-              <ProfileChip
-                icon="school"
-                label={member.className || "-"}
-              />
+              <ProfileChip icon="school" label={member.namaKelas || "-"} />
               <ProfileChip
                 icon="verified"
-                label={getMembershipStatusLabel(
-                  member.membershipStatus
-                )}
+                label={labelStatus(member.statusKeanggotaan)}
               />
               <ProfileChip
                 icon="calendar_month"
-                label={`Periode ${member.period || "-"}`}
+                label={`Periode ${data.period?.namaPeriode || "-"}`}
               />
             </div>
           </div>
@@ -123,47 +167,24 @@ export default function BiodataAnggota() {
 
       <section className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-5">
         <div className="space-y-6 xl:col-span-3">
-          <InfoCard
-            icon="person"
-            title="Informasi Pribadi"
-          >
+          <InfoCard icon="person" title="Informasi Pribadi">
             <div className="grid grid-cols-1 gap-x-10 gap-y-6 md:grid-cols-2">
-              <InfoItem
-                label="Tempat, Tanggal Lahir"
-                value={`${member.placeOfBirth || "-"}, ${formatDate(
-                  member.dateOfBirth
-                )}`}
-              />
+              <InfoItem label="Nama Lengkap" value={member.namaLengkap || "-"} />
+              <InfoItem label="NIS" value={member.nis || "-"} />
+              <InfoItem label="Kelas" value={member.namaKelas || "-"} />
               <InfoItem
                 label="Jenis Kelamin"
-                value={
-                  member.gender === "male"
-                    ? "Laki-laki"
-                    : member.gender === "female"
-                      ? "Perempuan"
-                      : "-"
-                }
+                value={labelJenisKelamin(member.jenisKelamin)}
               />
               <InfoItem
                 label="Alamat Lengkap"
-                value={member.address || "-"}
+                value={member.alamat || "-"}
                 full
-              />
-              <InfoItem
-                label="Agama"
-                value={member.religion || "-"}
-              />
-              <InfoItem
-                label="Golongan Darah"
-                value={member.bloodType || "-"}
               />
             </div>
           </InfoCard>
 
-          <InfoCard
-            icon="mail"
-            title="Informasi Kontak"
-          >
+          <InfoCard icon="mail" title="Informasi Kontak">
             <div className="space-y-4">
               <ContactItem
                 icon="mail"
@@ -171,34 +192,45 @@ export default function BiodataAnggota() {
                 value={member.email || "-"}
               />
               <ContactItem
-                icon="person"
-                label="Nomor WhatsApp"
-                value={formatPhone(member.whatsapp)}
+                icon="phone"
+                label="Nomor Telepon"
+                value={formatPhone(member.nomorTelepon)}
+              />
+            </div>
+          </InfoCard>
+
+          <InfoCard icon="description" title="Informasi Pendaftaran">
+            <div className="space-y-5">
+              <InfoItem
+                label="Motivasi Bergabung"
+                value={member.motivasi || "-"}
+              />
+              <InfoItem
+                label="Pengalaman Organisasi"
+                value={member.pengalamanOrganisasi || "Belum ada"}
               />
             </div>
           </InfoCard>
         </div>
 
         <div className="space-y-6 xl:col-span-2">
-          <InfoCard
-            icon="groups"
-            title="Informasi Organisasi"
-          >
+          <InfoCard icon="groups" title="Informasi Organisasi">
             <div className="space-y-5">
               <InfoItem
-                label="Jabatan Utama"
-                value={
-                  member.organisationPosition ||
-                  "Anggota OSIS"
-                }
+                label="Kode Anggota"
+                value={member.kodeAnggota || "-"}
               />
               <InfoItem
-                label="Divisi atau Sekbid"
-                value={
-                  division
-                    ? `Sekbid ${division.code}: ${division.name}`
-                    : "Belum ditentukan"
-                }
+                label="Jabatan"
+                value={member.jabatanOrganisasi || "Anggota"}
+              />
+              <InfoItem
+                label="Divisi / Sekbid"
+                value={labelDivisi(data.division)}
+              />
+              <InfoItem
+                label="Periode"
+                value={data.period?.namaPeriode || "-"}
               />
 
               <div className="grid grid-cols-2 gap-4">
@@ -207,9 +239,7 @@ export default function BiodataAnggota() {
                     Status
                   </p>
                   <p className="mt-2 text-sm font-bold text-primary">
-                    {getMembershipStatusLabel(
-                      member.membershipStatus
-                    )}
+                    {labelStatus(member.statusKeanggotaan)}
                   </p>
                 </div>
                 <div className="rounded-xl border border-border bg-surface p-4">
@@ -217,7 +247,7 @@ export default function BiodataAnggota() {
                     Bergabung
                   </p>
                   <p className="mt-2 text-sm font-semibold text-text">
-                    {formatDate(member.joinedAt)}
+                    {formatDate(member.bergabungPada)}
                   </p>
                 </div>
               </div>
@@ -226,37 +256,24 @@ export default function BiodataAnggota() {
 
           <div className="rounded-2xl border border-border bg-card p-6 shadow-sm">
             <SectionTitle
-              icon="badge"
-              title="Pencapaian dan Tugas"
-              description="Catatan kontribusi yang tersimpan pada profil."
+              icon="history"
+              title="Riwayat Data"
+              description="Waktu pendaftaran dan pembaruan data anggota."
             />
 
-            <div className="mt-5 space-y-3">
-              {member.achievements?.length ? (
-                member.achievements.map((achievement) => (
-                  <div
-                    key={achievement.id}
-                    className="flex items-start gap-3 rounded-xl bg-surface p-4"
-                  >
-                    <div className="mt-0.5 text-primary">
-                      <AppIcon name="verified" size={18} />
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium leading-6 text-text">
-                        {achievement.title}
-                      </p>
-                      <p className="mt-1 text-xs text-text-muted">
-                        {achievement.year || "-"}
-                      </p>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <EmptyState
-                  icon="badge"
-                  title="Belum ada pencapaian"
-                />
-              )}
+            <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-1">
+              <InfoItem
+                label="Diajukan"
+                value={formatDate(member.diajukanPada)}
+              />
+              <InfoItem
+                label="Ditinjau"
+                value={formatDate(member.ditinjauPada)}
+              />
+              <InfoItem
+                label="Terakhir Diperbarui"
+                value={formatDate(member.diperbaruiPada)}
+              />
             </div>
           </div>
         </div>
@@ -291,8 +308,8 @@ function InfoItem({ label, value, full = false }) {
       <p className="text-[11px] font-bold uppercase tracking-wider text-text-muted">
         {label}
       </p>
-      <p className="mt-1 text-sm font-semibold leading-6 text-text">
-        {value}
+      <p className="mt-1 break-words text-sm font-semibold leading-6 text-text">
+        {value || "-"}
       </p>
     </div>
   );
@@ -309,7 +326,7 @@ function ContactItem({ icon, label, value }) {
           {label}
         </p>
         <p className="mt-1 break-all text-sm font-semibold text-text">
-          {value}
+          {value || "-"}
         </p>
       </div>
     </div>

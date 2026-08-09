@@ -11,15 +11,22 @@ export const KOLEKSI = Object.freeze({
 
 export const FIELD = Object.freeze({
   ANGGOTA: Object.freeze({
+    KODE_ANGGOTA: "kodeAnggota",
+    ID_PENGGUNA: "idPengguna",
     NAMA_LENGKAP: "namaLengkap",
     NIS: "nis",
     NAMA_KELAS: "namaKelas",
+    JENIS_KELAMIN: "jenisKelamin",
     JABATAN_ORGANISASI: "jabatanOrganisasi",
     ID_DIVISI: "idDivisi",
     ID_PERIODE: "idPeriode",
     STATUS_KEANGGOTAAN: "statusKeanggotaan",
     EMAIL: "email",
     NOMOR_TELEPON: "nomorTelepon",
+    ALAMAT: "alamat",
+    MOTIVASI: "motivasi",
+    PENGALAMAN_ORGANISASI: "pengalamanOrganisasi",
+    CATATAN_REVIEW: "catatanReview",
     BERGABUNG_PADA: "bergabungPada",
     DIAJUKAN_PADA: "diajukanPada",
     DITINJAU_PADA: "ditinjauPada",
@@ -35,6 +42,7 @@ export const FIELD = Object.freeze({
 
   PERIODE: Object.freeze({
     NAMA: "namaPeriode",
+    AKTIF: "aktif",
   }),
 
   RINGKASAN_ABSENSI: Object.freeze({
@@ -92,15 +100,22 @@ export const LABEL_STATUS_KEANGGOTAAN = Object.freeze({
 
 // Draft entity untuk dokumentasi skema dan kebutuhan form berikutnya.
 export const DRAF_ANGGOTA = Object.freeze({
+  kodeAnggota: "",
+  idPengguna: null,
   namaLengkap: "",
   nis: "",
   namaKelas: "",
+  jenisKelamin: "",
   jabatanOrganisasi: "Anggota",
   idDivisi: null,
   idPeriode: null,
   statusKeanggotaan: STATUS_KEANGGOTAAN.MENUNGGU_REVIEW,
   email: "",
   nomorTelepon: "",
+  alamat: "",
+  motivasi: "",
+  pengalamanOrganisasi: null,
+  catatanReview: null,
   bergabungPada: null,
   diajukanPada: null,
   ditinjauPada: null,

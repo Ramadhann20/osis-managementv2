@@ -5,89 +5,249 @@ import { useEffect, useMemo, useState } from "react";
 import AppIcon from "@/components/global/AppIcon";
 import { useAuth } from "@/context/AuthContext";
 import { useDb } from "@/context/DbContext";
-import { useDoc } from "@/hooks/useDoc";
+import { useCollection } from "@/hooks/useCollection";
+import { buatKodeAnggota } from "@/lib/codefication";
 
-const MEMBERSHIP_STATUS = {
-  NOT_SUBMITTED: "not_submitted",
-  PENDING_REVIEW: "pending_review",
-  REJECTED: "rejected",
-  ACTIVE: "active",
-};
+// Skema yang dipakai halaman pendaftaran.
+// Nilainya disamakan dengan modul Data Anggota terbaru.
+const KOLEKSI = Object.freeze({
+  ANGGOTA: "Anggota",
+  DIVISI: "Divisi",
+  PERIODE: "Periode",
+});
 
-const initialForm = {
-  fullName: "",
+const FIELD = Object.freeze({
+  ANGGOTA: Object.freeze({
+    KODE_ANGGOTA: "kodeAnggota",
+    ID_PENGGUNA: "idPengguna",
+    NAMA_LENGKAP: "namaLengkap",
+    NIS: "nis",
+    NAMA_KELAS: "namaKelas",
+    JENIS_KELAMIN: "jenisKelamin",
+    EMAIL: "email",
+    NOMOR_TELEPON: "nomorTelepon",
+    ALAMAT: "alamat",
+    ID_DIVISI: "idDivisi",
+    ID_PERIODE: "idPeriode",
+    JABATAN_ORGANISASI: "jabatanOrganisasi",
+    MOTIVASI: "motivasi",
+    PENGALAMAN_ORGANISASI: "pengalamanOrganisasi",
+    STATUS_KEANGGOTAAN: "statusKeanggotaan",
+    CATATAN_REVIEW: "catatanReview",
+    BERGABUNG_PADA: "bergabungPada",
+    DIAJUKAN_PADA: "diajukanPada",
+    DITINJAU_PADA: "ditinjauPada",
+    DIBUAT_PADA: "dibuatPada",
+    DIPERBARUI_PADA: "diperbaruiPada",
+  }),
+
+  DIVISI: Object.freeze({
+    KODE: "kode",
+    NAMA: "nama",
+    NAMA_SINGKAT: "namaSingkat",
+  }),
+
+  PERIODE: Object.freeze({
+    NAMA: "namaPeriode",
+    AKTIF: "aktif",
+  }),
+});
+
+const STATUS_KEANGGOTAAN = Object.freeze({
+  MENUNGGU_REVIEW: "menunggu_review",
+  AKTIF: "aktif",
+  NONAKTIF: "nonaktif",
+  DITANGGUHKAN: "ditangguhkan",
+  DITOLAK: "ditolak",
+});
+
+const DRAF_FORM_PENDAFTARAN = Object.freeze({
+  namaLengkap: "",
   nis: "",
-  className: "",
-  gender: "",
-  whatsapp: "",
-  address: "",
-  divisionInterest: "",
-  motivation: "",
-  organizationExperience: "",
-};
+  namaKelas: "",
+  jenisKelamin: "",
+  nomorTelepon: "",
+  alamat: "",
+  idDivisi: "",
+  motivasi: "",
+  pengalamanOrganisasi: "",
+});
 
-const classOptions = [
-  "X MIPA 1",
-  "X MIPA 2",
-  "X IPS 1",
-  "XI MIPA 1",
-  "XI IPS 1",
-  "XII MIPA 1",
-  "XII IPS 1",
-];
+function buatDrafFormPendaftaran() {
+  return { ...DRAF_FORM_PENDAFTARAN };
+}
 
-const divisionOptions = [
-  "Sekbid I: Keimanan dan Ketakwaan",
-  "Sekbid II: Budi Pekerti Luhur",
-  "Sekbid III: Bela Negara",
-  "Sekbid IV: Akademik dan IPTEK",
-  "Sekbid V: Organisasi dan Kepemimpinan",
-  "Sekbid VI: Kreativitas dan Kewirausahaan",
-  "Sekbid VII: Kualitas Jasmani dan Kesehatan",
-  "Sekbid VIII: Sastra dan Budaya",
-  "Sekbid IX: Teknologi Informasi dan Komunikasi",
-  "Sekbid X: Komunikasi Bahasa Inggris",
-];
+function rowsOf(result) {
+  return Array.isArray(result?.rows) ? result.rows : [];
+}
+
+function isBadanPengurusHarian(divisi) {
+  const kode = String(divisi?.[FIELD.DIVISI.KODE] || "")
+    .trim()
+    .toUpperCase();
+
+  const nama = String(
+    divisi?.[FIELD.DIVISI.NAMA_SINGKAT] ||
+      divisi?.[FIELD.DIVISI.NAMA] ||
+      ""
+  )
+    .trim()
+    .toLowerCase();
+
+  return kode === "BPH" || nama === "badan pengurus harian";
+}
+
+function labelDivisi(divisi) {
+  return (
+    divisi?.[FIELD.DIVISI.NAMA_SINGKAT] ||
+    divisi?.[FIELD.DIVISI.NAMA] ||
+    "-"
+  );
+}
 
 export default function PendaftaranPage() {
   const { user, userDoc, accessLoading } = useAuth();
-  const { setDoc, serverTimestamp } = useDb();
-
   const {
-    data: member,
-    loading: memberLoading,
-    error: memberError,
-  } = useDoc("Anggota", user?.uid, {
-    enabled: Boolean(user?.uid),
+    colRef,
+    query,
+    where,
+    limit,
+    addDoc,
+    updateDoc,
+    serverTimestamp,
+  } = useDb();
+
+  // document.id Anggota selalu Auto ID Firestore.
+  // Relasi ke akun aplikasi memakai idPengguna (FK ke dokumen Users),
+  // sedangkan identifier yang dibaca manusia adalah kodeAnggota.
+  const idPengguna = userDoc?.id || null;
+
+  const anggotaSaya = useCollection(
+    () =>
+      idPengguna
+        ? query(
+            colRef(KOLEKSI.ANGGOTA),
+            where(FIELD.ANGGOTA.ID_PENGGUNA, "==", idPengguna),
+            limit(2)
+          )
+        : null,
+    [idPengguna],
+    { enabled: Boolean(idPengguna) }
+  );
+
+  const divisi = useCollection(() => colRef(KOLEKSI.DIVISI), [], {
+    enabled: true,
   });
 
-  const [form, setForm] = useState(initialForm);
+  const periode = useCollection(() => colRef(KOLEKSI.PERIODE), [], {
+    enabled: true,
+  });
+
+  const [form, setForm] = useState(() => buatDrafFormPendaftaran());
   const [formError, setFormError] = useState("");
   const [actionError, setActionError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [restarting, setRestarting] = useState(false);
+  const [modePerbaikan, setModePerbaikan] = useState(false);
+
+  const anggotaRows = rowsOf(anggotaSaya);
+  const member = anggotaRows[0] || null;
+  const adaDuplikasiAnggota = anggotaRows.length > 1;
 
   const email = useMemo(
     () => user?.email ?? userDoc?.email ?? "",
     [user?.email, userDoc?.email]
   );
 
+  const periodeAktifRows = useMemo(
+    () =>
+      rowsOf(periode).filter(
+        (item) => item?.[FIELD.PERIODE.AKTIF] === true
+      ),
+    [periode]
+  );
+
+  const periodeAktif =
+    periodeAktifRows.length === 1 ? periodeAktifRows[0] : null;
+
+  const sekbidRows = useMemo(
+    () =>
+      rowsOf(divisi)
+        .filter((item) => !isBadanPengurusHarian(item))
+        .sort((a, b) =>
+          String(labelDivisi(a)).localeCompare(String(labelDivisi(b)), "id")
+        ),
+    [divisi]
+  );
+
+  const opsiDivisi = useMemo(
+    () =>
+      sekbidRows.map((item) => ({
+        value: item.id,
+        label: labelDivisi(item),
+      })),
+    [sekbidRows]
+  );
+
+  const petaDivisi = useMemo(
+    () => new Map(rowsOf(divisi).map((item) => [item.id, item])),
+    [divisi]
+  );
+
+  const konfigurasiError = useMemo(() => {
+    if (!idPengguna) {
+      return "Profil pengguna belum tersedia. Muat ulang halaman atau login kembali.";
+    }
+
+    if (periodeAktifRows.length === 0) {
+      return "Belum ada periode kepengurusan aktif. Pendaftaran belum dapat dikirim.";
+    }
+
+    if (periodeAktifRows.length > 1) {
+      return "Terdapat lebih dari satu periode aktif. Perbaiki data Periode sebelum membuka pendaftaran.";
+    }
+
+    if (sekbidRows.length === 0) {
+      return "Belum ada Sekbid yang dapat dipilih. Segera Hubungi Pembina untuk menambahkan Sekbid sebelum membuka pendaftaran.";
+    }
+
+    return "";
+  }, [idPengguna, periodeAktifRows.length, sekbidRows.length]);
+
   const membershipStatus =
-    member?.membershipStatus ?? MEMBERSHIP_STATUS.NOT_SUBMITTED;
+    member?.[FIELD.ANGGOTA.STATUS_KEANGGOTAAN] || null;
 
   useEffect(() => {
     setForm({
-      fullName: member?.fullName ?? userDoc?.fullName ?? "",
-      nis: member?.nis ?? userDoc?.nis ?? "",
-      className: member?.className ?? userDoc?.className ?? "",
-      gender: member?.gender ?? userDoc?.gender ?? "",
-      whatsapp: member?.whatsapp ?? userDoc?.whatsapp ?? "",
-      address: member?.address ?? userDoc?.address ?? "",
-      divisionInterest: member?.divisionInterest ?? "",
-      motivation: member?.motivation ?? "",
-      organizationExperience: member?.organizationExperience ?? "",
+      namaLengkap:
+        member?.[FIELD.ANGGOTA.NAMA_LENGKAP] ??
+        userDoc?.namaLengkap ??
+        user?.displayName ??
+        "",
+      nis: member?.[FIELD.ANGGOTA.NIS] ?? userDoc?.nis ?? "",
+      namaKelas:
+        member?.[FIELD.ANGGOTA.NAMA_KELAS] ?? userDoc?.namaKelas ?? "",
+      jenisKelamin:
+        member?.[FIELD.ANGGOTA.JENIS_KELAMIN] ??
+        userDoc?.jenisKelamin ??
+        "",
+      nomorTelepon:
+        member?.[FIELD.ANGGOTA.NOMOR_TELEPON] ??
+        userDoc?.nomorTelepon ??
+        "",
+      alamat:
+        member?.[FIELD.ANGGOTA.ALAMAT] ?? userDoc?.alamat ?? "",
+      idDivisi: member?.[FIELD.ANGGOTA.ID_DIVISI] ?? "",
+      motivasi: member?.[FIELD.ANGGOTA.MOTIVASI] ?? "",
+      pengalamanOrganisasi:
+        member?.[FIELD.ANGGOTA.PENGALAMAN_ORGANISASI] ?? "",
     });
-  }, [member, userDoc]);
+  }, [member, userDoc, user?.displayName]);
+
+  useEffect(() => {
+    if (membershipStatus !== STATUS_KEANGGOTAAN.DITOLAK) {
+      setModePerbaikan(false);
+    }
+  }, [membershipStatus]);
 
   function handleChange(event) {
     const { name, value } = event.target;
@@ -102,22 +262,26 @@ export default function PendaftaranPage() {
   }
 
   function validateForm() {
+    if (konfigurasiError) {
+      return konfigurasiError;
+    }
+
     const requiredValues = [
-      form.fullName,
+      form.namaLengkap,
       form.nis,
-      form.className,
-      form.gender,
-      form.whatsapp,
-      form.address,
-      form.divisionInterest,
-      form.motivation,
+      form.namaKelas,
+      form.jenisKelamin,
+      form.nomorTelepon,
+      form.alamat,
+      form.idDivisi,
+      form.motivasi,
     ];
 
     if (requiredValues.some((value) => !String(value).trim())) {
       return "Lengkapi seluruh kolom wajib sebelum mengirim pendaftaran.";
     }
 
-    if (form.fullName.trim().length < 3) {
+    if (form.namaLengkap.trim().length < 3) {
       return "Nama lengkap minimal 3 karakter.";
     }
 
@@ -125,16 +289,27 @@ export default function PendaftaranPage() {
       return "NIS harus berisi 5 sampai 20 digit angka.";
     }
 
-    const normalizedWhatsapp = form.whatsapp.replace(/\D/g, "");
+    const nomorTelepon = form.nomorTelepon.replace(/\D/g, "");
 
-    if (normalizedWhatsapp.length < 9 || normalizedWhatsapp.length > 15) {
+    if (nomorTelepon.length < 9 || nomorTelepon.length > 15) {
       return "Nomor WhatsApp harus berisi 9 sampai 15 digit.";
     }
 
-    if (form.address.trim().length < 10) {
+    if (form.alamat.trim().length < 10) {
       return "Alamat lengkap minimal 10 karakter.";
     }
 
+    if (form.motivasi.trim().length < 30) {
+      return "Alasan bergabung minimal 30 karakter.";
+    }
+
+    if (!sekbidRows.some((item) => item.id === form.idDivisi)) {
+      return "Sekbid yang dipilih tidak valid atau sudah tidak tersedia.";
+    }
+
+    if (!periodeAktif?.id) {
+      return "Periode aktif tidak ditemukan.";
+    }
 
     return "";
   }
@@ -142,8 +317,15 @@ export default function PendaftaranPage() {
   async function handleSubmit(event) {
     event.preventDefault();
 
-    if (!user?.uid) {
-      setActionError("Sesi pengguna tidak ditemukan. Silakan login kembali.");
+    if (!idPengguna) {
+      setActionError("Profil pengguna tidak ditemukan. Silakan login kembali.");
+      return;
+    }
+
+    if (adaDuplikasiAnggota) {
+      setActionError(
+        "Terdapat lebih dari satu data anggota untuk akun ini. Hubungi pembina sebelum mengirim ulang."
+      );
       return;
     }
 
@@ -158,36 +340,60 @@ export default function PendaftaranPage() {
     setActionError("");
 
     try {
-      await setDoc(
-        "Anggota",
-        user.uid,
-        {
-          uid: user.uid,
-          email,
-          username: userDoc?.username ?? "",
-          fullName: form.fullName.trim(),
-          nis: form.nis.trim(),
-          className: form.className,
-          gender: form.gender,
-          whatsapp: form.whatsapp.replace(/\D/g, ""),
-          address: form.address.trim(),
-          divisionInterest: form.divisionInterest,
-          motivation: form.motivation.trim(),
-          organizationExperience:
-            form.organizationExperience.trim() || null,
+      const waktu = serverTimestamp();
 
-          membershipStatus: MEMBERSHIP_STATUS.PENDING_REVIEW,
+      // Kode bisnis dibuat hanya saat dokumen belum memiliki kode.
+      // Firestore document.id tetap sepenuhnya Auto ID.
+      const tahunPeriode = Number(
+        String(periodeAktif?.[FIELD.PERIODE.NAMA] || "").match(/\d{4}/)?.[0]
+      ) || new Date().getFullYear();
 
-          reviewedBy: null,
-          reviewedAt: null,
-          reviewNote: null,
+      const kodeAnggota =
+        member?.[FIELD.ANGGOTA.KODE_ANGGOTA] ||
+        (await buatKodeAnggota({ tahun: tahunPeriode }));
 
-          createdAt: member?.createdAt ?? serverTimestamp(),
-          submittedAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
+      const payload = {
+        [FIELD.ANGGOTA.KODE_ANGGOTA]: kodeAnggota,
+        [FIELD.ANGGOTA.ID_PENGGUNA]: idPengguna,
+        [FIELD.ANGGOTA.NAMA_LENGKAP]: form.namaLengkap.trim(),
+        [FIELD.ANGGOTA.NIS]: form.nis.trim(),
+        [FIELD.ANGGOTA.NAMA_KELAS]: form.namaKelas.trim(),
+        [FIELD.ANGGOTA.JENIS_KELAMIN]: form.jenisKelamin,
+        [FIELD.ANGGOTA.EMAIL]: email,
+        [FIELD.ANGGOTA.NOMOR_TELEPON]:
+          form.nomorTelepon.replace(/\D/g, ""),
+        [FIELD.ANGGOTA.ALAMAT]: form.alamat.trim(),
+
+        // Sekbid yang dipilih langsung disimpan sebagai relasi idDivisi.
+        // Pending member belum dianggap anggota resmi sampai statusnya AKTIF.
+        [FIELD.ANGGOTA.ID_DIVISI]: form.idDivisi,
+        [FIELD.ANGGOTA.ID_PERIODE]: periodeAktif.id,
+        [FIELD.ANGGOTA.JABATAN_ORGANISASI]: "Anggota",
+
+        [FIELD.ANGGOTA.MOTIVASI]: form.motivasi.trim(),
+        [FIELD.ANGGOTA.PENGALAMAN_ORGANISASI]:
+          form.pengalamanOrganisasi.trim() || null,
+
+        [FIELD.ANGGOTA.STATUS_KEANGGOTAAN]:
+          STATUS_KEANGGOTAAN.MENUNGGU_REVIEW,
+        [FIELD.ANGGOTA.CATATAN_REVIEW]: null,
+        [FIELD.ANGGOTA.DITINJAU_PADA]: null,
+        [FIELD.ANGGOTA.BERGABUNG_PADA]:
+          member?.[FIELD.ANGGOTA.BERGABUNG_PADA] ?? null,
+        [FIELD.ANGGOTA.DIAJUKAN_PADA]: waktu,
+        [FIELD.ANGGOTA.DIPERBARUI_PADA]: waktu,
+      };
+
+      if (member?.id) {
+        await updateDoc(KOLEKSI.ANGGOTA, member.id, payload);
+      } else {
+        await addDoc(KOLEKSI.ANGGOTA, {
+          ...payload,
+          [FIELD.ANGGOTA.DIBUAT_PADA]: waktu,
+        });
+      }
+
+      setModePerbaikan(false);
     } catch (error) {
       console.error("PENDAFTARAN SUBMIT ERROR:", error);
       setActionError(
@@ -198,43 +404,23 @@ export default function PendaftaranPage() {
     }
   }
 
-  async function handleRestartRegistration() {
-    if (!user?.uid) {
-      setActionError("Sesi pengguna tidak ditemukan. Silakan login kembali.");
-      return;
-    }
-
-    setRestarting(true);
+  function handleRestartRegistration() {
     setActionError("");
-
-    try {
-      await setDoc(
-        "Anggota",
-        user.uid,
-        {
-          membershipStatus: MEMBERSHIP_STATUS.NOT_SUBMITTED,
-          reviewedBy: null,
-          reviewedAt: null,
-          reviewNote: null,
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
-    } catch (error) {
-      console.error("RESTART PENDAFTARAN ERROR:", error);
-      setActionError(
-        "Pendaftaran belum dapat dimulai ulang. Periksa koneksi lalu coba kembali."
-      );
-    } finally {
-      setRestarting(false);
-    }
+    setFormError("");
+    setModePerbaikan(true);
   }
 
-  if (accessLoading || memberLoading) {
+  const sedangMemuat =
+    accessLoading || anggotaSaya.loading || divisi.loading || periode.loading;
+
+  const readError =
+    anggotaSaya.error || divisi.error || periode.error || null;
+
+  if (sedangMemuat) {
     return <PageLoader />;
   }
 
-  if (memberError) {
+  if (readError) {
     return (
       <CenteredStatus
         icon="close"
@@ -245,33 +431,71 @@ export default function PendaftaranPage() {
     );
   }
 
-  if (membershipStatus === MEMBERSHIP_STATUS.PENDING_REVIEW) {
+  if (adaDuplikasiAnggota) {
+    return (
+      <CenteredStatus
+        icon="close"
+        title="Data pendaftaran ganda"
+        description="Ditemukan lebih dari satu dokumen Anggota untuk akun ini. Hubungi pembina agar data duplikat dibersihkan."
+        tone="error"
+      />
+    );
+  }
+
+  if (
+    membershipStatus === STATUS_KEANGGOTAAN.MENUNGGU_REVIEW &&
+    !modePerbaikan
+  ) {
     return (
       <PendingReviewView
         member={member}
+        namaDivisi={labelDivisi(petaDivisi.get(member?.idDivisi))}
         actionError={actionError}
       />
     );
   }
 
-  if (membershipStatus === MEMBERSHIP_STATUS.REJECTED) {
+  if (
+    membershipStatus === STATUS_KEANGGOTAAN.DITOLAK &&
+    !modePerbaikan
+  ) {
     return (
       <RejectedView
-        reviewNote={member?.reviewNote}
-        restarting={restarting}
+        catatanReview={member?.[FIELD.ANGGOTA.CATATAN_REVIEW]}
         actionError={actionError}
         onRestart={handleRestartRegistration}
       />
     );
   }
 
-  if (membershipStatus === MEMBERSHIP_STATUS.ACTIVE) {
+  if (membershipStatus === STATUS_KEANGGOTAAN.AKTIF) {
     return (
       <CenteredStatus
         icon="verified_user"
         title="Pendaftaran disetujui"
         description="Pembina telah menyetujui pendaftaranmu. Akunmu sudah tercatat sebagai anggota aktif."
         tone="success"
+      />
+    );
+  }
+
+  if (membershipStatus === STATUS_KEANGGOTAAN.NONAKTIF) {
+    return (
+      <CenteredStatus
+        icon="person"
+        title="Keanggotaan tidak aktif"
+        description="Data keanggotaanmu masih tercatat, tetapi statusnya saat ini tidak aktif."
+      />
+    );
+  }
+
+  if (membershipStatus === STATUS_KEANGGOTAAN.DITANGGUHKAN) {
+    return (
+      <CenteredStatus
+        icon="block"
+        title="Keanggotaan ditangguhkan"
+        description="Status keanggotaanmu sedang ditangguhkan. Hubungi pembina untuk informasi lebih lanjut."
+        tone="error"
       />
     );
   }
@@ -283,6 +507,9 @@ export default function PendaftaranPage() {
       submitting={submitting}
       formError={formError}
       actionError={actionError}
+      opsiDivisi={opsiDivisi}
+      namaPeriodeAktif={periodeAktif?.[FIELD.PERIODE.NAMA] || ""}
+      konfigurasiError={konfigurasiError}
       onChange={handleChange}
       onSubmit={handleSubmit}
     />
@@ -295,6 +522,9 @@ function RegistrationForm({
   submitting,
   formError,
   actionError,
+  opsiDivisi,
+  namaPeriodeAktif,
+  konfigurasiError,
   onChange,
   onSubmit,
 }) {
@@ -315,7 +545,7 @@ function RegistrationForm({
           </h1>
 
           <p className="mx-auto mt-3 max-w-2xl text-sm leading-6 text-text-muted sm:text-base">
-            Data akan diperiksa oleh pembina. Role anggota baru diberikan
+            Data akan diperiksa oleh pembina. Status anggota aktif diberikan
             setelah pendaftaran disetujui.
           </p>
         </header>
@@ -325,6 +555,16 @@ function RegistrationForm({
           className="space-y-6 rounded-3xl border border-border bg-card p-5 shadow-lg sm:p-8"
           noValidate
         >
+          <div className="rounded-2xl border border-border bg-input px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-wider text-text-muted">
+              Periode Pendaftaran
+            </p>
+            <p className="mt-1 font-semibold text-text">
+              {namaPeriodeAktif || "Belum ada periode aktif"}
+            </p>
+          </div>
+
+          {konfigurasiError && <AlertMessage message={konfigurasiError} />}
           <FormSection
             icon="person"
             title="Informasi pribadi"
@@ -332,12 +572,12 @@ function RegistrationForm({
           >
             <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
               <TextField
-                id="fullName"
+                id="namaLengkap"
                 label="Nama Lengkap"
-                value={form.fullName}
+                value={form.namaLengkap}
                 placeholder="Contoh: Muhammad Rizky"
                 onChange={onChange}
-                disabled={submitting}
+                disabled={submitting || Boolean(konfigurasiError)}
                 required
               />
 
@@ -348,18 +588,17 @@ function RegistrationForm({
                 placeholder="Masukkan NIS"
                 inputMode="numeric"
                 onChange={onChange}
-                disabled={submitting}
+                disabled={submitting || Boolean(konfigurasiError)}
                 required
               />
 
-              <SelectField
-                id="className"
+              <TextField
+                id="namaKelas"
                 label="Kelas"
-                value={form.className}
-                options={classOptions}
-                placeholder="Pilih kelas"
+                value={form.namaKelas}
+                placeholder="Contoh: XI-1"
                 onChange={onChange}
-                disabled={submitting}
+                disabled={submitting || Boolean(konfigurasiError)}
                 required
               />
 
@@ -368,21 +607,21 @@ function RegistrationForm({
 
                 <div className="flex min-h-12 items-center gap-6 rounded-xl border border-border bg-input px-4">
                   <RadioField
-                    name="gender"
+                    name="jenisKelamin"
                     value="laki-laki"
                     label="Laki-laki"
-                    checked={form.gender === "laki-laki"}
+                    checked={form.jenisKelamin === "laki-laki"}
                     onChange={onChange}
-                    disabled={submitting}
+                    disabled={submitting || Boolean(konfigurasiError)}
                   />
 
                   <RadioField
-                    name="gender"
+                    name="jenisKelamin"
                     value="perempuan"
                     label="Perempuan"
-                    checked={form.gender === "perempuan"}
+                    checked={form.jenisKelamin === "perempuan"}
                     onChange={onChange}
-                    disabled={submitting}
+                    disabled={submitting || Boolean(konfigurasiError)}
                   />
                 </div>
               </div>
@@ -405,27 +644,27 @@ function RegistrationForm({
               />
 
               <TextField
-                id="whatsapp"
+                id="nomorTelepon"
                 label="Nomor WhatsApp"
                 type="tel"
-                value={form.whatsapp}
+                value={form.nomorTelepon}
                 placeholder="Contoh: 081234567890"
                 inputMode="tel"
                 onChange={onChange}
-                disabled={submitting}
+                disabled={submitting || Boolean(konfigurasiError)}
                 required
               />
             </div>
 
             <div className="mt-5">
               <TextareaField
-                id="address"
+                id="alamat"
                 label="Alamat Lengkap"
-                value={form.address}
+                value={form.alamat}
                 placeholder="Masukkan alamat tempat tinggal"
                 rows={3}
                 onChange={onChange}
-                disabled={submitting}
+                disabled={submitting || Boolean(konfigurasiError)}
                 required
               />
             </div>
@@ -437,25 +676,25 @@ function RegistrationForm({
             description="Jelaskan minat dan alasan mengikuti organisasi."
           >
             <SelectField
-              id="divisionInterest"
-              label="Divisi atau Sekbid yang Diminati"
-              value={form.divisionInterest}
-              options={divisionOptions}
-              placeholder="Pilih divisi"
+              id="idDivisi"
+              label="Sekbid Pilihan"
+              value={form.idDivisi}
+              options={opsiDivisi}
+              placeholder="Pilih sekbid"
               onChange={onChange}
-              disabled={submitting}
+              disabled={submitting || Boolean(konfigurasiError)}
               required
             />
 
             <div className="mt-5">
               <TextareaField
-                id="motivation"
+                id="motivasi"
                 label="Alasan Bergabung"
-                value={form.motivation}
+                value={form.motivasi}
                 placeholder="Jelaskan motivasi dan kontribusi yang ingin kamu berikan"
                 rows={4}
                 onChange={onChange}
-                disabled={submitting}
+                disabled={submitting || Boolean(konfigurasiError)}
                 required
                 hint="Minimal 30 karakter."
               />
@@ -463,13 +702,13 @@ function RegistrationForm({
 
             <div className="mt-5">
               <TextareaField
-                id="organizationExperience"
+                id="pengalamanOrganisasi"
                 label="Pengalaman Organisasi"
-                value={form.organizationExperience}
+                value={form.pengalamanOrganisasi}
                 placeholder="Ceritakan pengalaman organisasi atau kepanitiaan sebelumnya"
                 rows={4}
                 onChange={onChange}
-                disabled={submitting}
+                disabled={submitting || Boolean(konfigurasiError)}
                 hint="Opsional. Kosongkan jika belum memiliki pengalaman."
               />
             </div>
@@ -487,7 +726,7 @@ function RegistrationForm({
 
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || Boolean(konfigurasiError)}
               className="flex min-h-12 items-center justify-center gap-2 rounded-xl bg-primary px-6 font-semibold text-white transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
             >
               <AppIcon name="arrow_forward" size={20} />
@@ -500,7 +739,7 @@ function RegistrationForm({
   );
 }
 
-function PendingReviewView({ member, actionError }) {
+function PendingReviewView({ member, namaDivisi, actionError }) {
   return (
     <main className="flex min-h-screen items-center justify-center bg-surface px-4 py-10 sm:px-6">
       <section className="w-full max-w-xl rounded-3xl border border-border bg-card p-6 text-center shadow-lg sm:p-10">
@@ -518,13 +757,15 @@ function PendingReviewView({ member, actionError }) {
 
         <p className="mx-auto mt-4 max-w-md leading-7 text-text-muted">
           Data pendaftaranmu sudah diterima dan sedang diperiksa oleh pembina.
-          Role anggota akan diberikan setelah pendaftaran disetujui.
+          Status anggota aktif diberikan setelah pendaftaran disetujui.
         </p>
 
         <div className="mt-7 rounded-2xl border border-border bg-input p-5 text-left">
-          <StatusRow label="Nama" value={member?.fullName || "-"} />
+          <StatusRow label="Kode Anggota" value={member?.kodeAnggota || "-"} />
+          <StatusRow label="Nama" value={member?.namaLengkap || "-"} />
           <StatusRow label="NIS" value={member?.nis || "-"} />
-          <StatusRow label="Kelas" value={member?.className || "-"} />
+          <StatusRow label="Kelas" value={member?.namaKelas || "-"} />
+          <StatusRow label="Sekbid" value={namaDivisi || "-"} />
           <StatusRow
             label="Status"
             value="Menunggu pemeriksaan pembina"
@@ -548,8 +789,7 @@ function PendingReviewView({ member, actionError }) {
 }
 
 function RejectedView({
-  reviewNote,
-  restarting,
+  catatanReview,
   actionError,
   onRestart,
 }) {
@@ -570,7 +810,7 @@ function RejectedView({
 
         <p className="mx-auto mt-4 max-w-md leading-7 text-text-muted">
           Pembina belum dapat menyetujui pendaftaranmu. Baca catatan berikut,
-          lalu mulai ulang pendaftaran untuk memperbaiki data.
+          lalu perbaiki data dan kirim kembali pendaftaran.
         </p>
 
         <div className="mt-7 rounded-2xl bg-error-bg p-5 text-left">
@@ -578,7 +818,7 @@ function RejectedView({
             Catatan Pembina
           </p>
           <p className="mt-2 leading-7 text-error-text">
-            {reviewNote || "Tidak ada catatan tambahan dari pembina."}
+            {catatanReview || "Pendaftaran ditolak tanpa catatan tambahan."}
           </p>
         </div>
 
@@ -591,15 +831,15 @@ function RejectedView({
         <button
           type="button"
           onClick={onRestart}
-          disabled={restarting}
+          
           className="mt-7 flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-primary px-6 font-semibold text-white transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
           <AppIcon name="edit" size={20} />
-          {restarting ? "Memulai Ulang..." : "Daftar Ulang"}
+          Perbaiki Pendaftaran
         </button>
 
         <p className="mt-3 text-xs leading-5 text-text-muted">
-          Data lama tetap digunakan sebagai isian awal agar kamu hanya perlu
+          Data sebelumnya tetap digunakan sebagai isian awal agar kamu hanya perlu
           memperbaiki bagian yang diperlukan.
         </p>
       </section>
@@ -734,11 +974,18 @@ function SelectField({
       >
         <option value="">{placeholder}</option>
 
-        {options.map((option) => (
-          <option key={option} value={option}>
-            {option}
-          </option>
-        ))}
+        {options.map((option) => {
+          const value =
+            typeof option === "string" ? option : String(option.value ?? "");
+          const label =
+            typeof option === "string" ? option : option.label ?? value;
+
+          return (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          );
+        })}
       </select>
     </div>
   );

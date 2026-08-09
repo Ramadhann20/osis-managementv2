@@ -1,12 +1,13 @@
 /**
- * Dummy minimal untuk Seeder Data Anggota.
+ * Dummy minimal Data Anggota — skema Indonesia + Firestore Auto ID.
  *
- * PENTING:
- * - Tidak ada field `id`.
- * - Tidak ada `ref`, alias, atau ID dummy buatan.
- * - Firestore document ID selalu dibuat otomatis oleh addDoc().
- * - idPeriode dan idDivisi tidak ditulis di dummy; seeder mengisinya
- *   menggunakan Auto ID Firestore yang benar pada saat proses seed.
+ * Prinsip:
+ * - Tidak ada field id/ref buatan.
+ * - Firestore document ID dibuat otomatis oleh addDoc().
+ * - Metadata `divisi` hanya dipakai seeder untuk menentukan relasi idDivisi
+ *   dan TIDAK disimpan ke collection Anggota.
+ * - Jabatan sederhana: Ketua, Wakil, Sekretaris, Bendahara, Anggota.
+ * - Sekbid dikenali dari nama divisinya, bukan nomor Romawi.
  */
 
 export const STATUS_KEANGGOTAAN = Object.freeze({
@@ -29,191 +30,240 @@ export const periodeSeeder = [
 export const divisiSeeder = [
   {
     kode: "BPH",
-    nama: "Badan Pengurus Harian OSIS",
-    namaSingkat: "Badan Pengurus",
+    nama: "Badan Pengurus Harian",
+    namaSingkat: "Badan Pengurus Harian",
   },
   {
-    kode: "I",
+    kode: "IMTAQ",
     nama: "Keimanan dan Ketakwaan terhadap Tuhan Yang Maha Esa",
     namaSingkat: "Keimanan dan Ketakwaan",
   },
   {
-    kode: "II",
+    kode: "BUDI",
     nama: "Budi Pekerti Luhur dan Akhlak Mulia",
     namaSingkat: "Budi Pekerti",
   },
   {
-    kode: "III",
+    kode: "BELA",
     nama: "Kepribadian Unggul, Wawasan Kebangsaan, dan Bela Negara",
     namaSingkat: "Bela Negara",
   },
   {
-    kode: "IV",
+    kode: "PRESTASI",
     nama: "Prestasi Akademik, Seni, dan Olahraga",
     namaSingkat: "Akademik dan Prestasi",
   },
 ];
 
+function anggota({
+  divisi,
+  namaLengkap,
+  nis,
+  namaKelas,
+  jabatanOrganisasi,
+  email,
+  nomorTelepon,
+  waktu,
+}) {
+  return {
+    // Metadata seeder. Tidak ikut disimpan ke Firestore.
+    divisi,
+
+    data: {
+      namaLengkap,
+      nis,
+      namaKelas,
+      jabatanOrganisasi,
+      statusKeanggotaan: STATUS_KEANGGOTAAN.AKTIF,
+      email,
+      nomorTelepon,
+      bergabungPada: "2026-07-20T08:00:00+07:00",
+      diajukanPada: waktu,
+      ditinjauPada: "2026-07-18T10:00:00+07:00",
+      dibuatPada: waktu,
+      diperbaruiPada: "2026-08-08T20:00:00+07:00",
+    },
+  };
+}
+
 export const anggotaSeeder = [
   // =========================================================
-  // BADAN PENGURUS HARIAN
+  // BADAN PENGURUS HARIAN — satu orang per jabatan
   // =========================================================
-  {
+  anggota({
+    divisi: "Badan Pengurus Harian",
     namaLengkap: "Adit Pratama",
     nis: "242510001",
     namaKelas: "XI-1",
-    jabatanOrganisasi: "Ketua OSIS",
-    statusKeanggotaan: STATUS_KEANGGOTAAN.AKTIF,
+    jabatanOrganisasi: "Ketua",
     email: "adit.pratama@smamutiara2.sch.id",
     nomorTelepon: "6281210000001",
-    bergabungPada: "2026-07-20T08:00:00+07:00",
-    diajukanPada: "2026-07-15T09:00:00+07:00",
-    ditinjauPada: "2026-07-18T10:00:00+07:00",
-    dibuatPada: "2026-07-15T09:00:00+07:00",
-    diperbaruiPada: "2026-07-20T08:00:00+07:00",
-  },
-  {
+    waktu: "2026-07-15T09:00:00+07:00",
+  }),
+  anggota({
+    divisi: "Badan Pengurus Harian",
     namaLengkap: "Nabila Putri Maharani",
     nis: "242510002",
     namaKelas: "XI-2",
-    jabatanOrganisasi: "Wakil Ketua I",
-    statusKeanggotaan: STATUS_KEANGGOTAAN.AKTIF,
+    jabatanOrganisasi: "Wakil",
     email: "nabila.maharani@smamutiara2.sch.id",
     nomorTelepon: "6281210000002",
-    bergabungPada: "2026-07-20T08:00:00+07:00",
-    diajukanPada: "2026-07-15T09:05:00+07:00",
-    ditinjauPada: "2026-07-18T10:05:00+07:00",
-    dibuatPada: "2026-07-15T09:05:00+07:00",
-    diperbaruiPada: "2026-07-20T08:00:00+07:00",
-  },
-  {
-    namaLengkap: "Fajar Ramadhan",
+    waktu: "2026-07-15T09:05:00+07:00",
+  }),
+  anggota({
+    divisi: "Badan Pengurus Harian",
+    namaLengkap: "Alya Putri",
     nis: "242510003",
     namaKelas: "XI-3",
-    jabatanOrganisasi: "Wakil Ketua II",
-    statusKeanggotaan: STATUS_KEANGGOTAAN.AKTIF,
-    email: "fajar.ramadhan@smamutiara2.sch.id",
+    jabatanOrganisasi: "Sekretaris",
+    email: "alya.putri@smamutiara2.sch.id",
     nomorTelepon: "6281210000003",
-    bergabungPada: "2026-07-20T08:00:00+07:00",
-    diajukanPada: "2026-07-15T09:10:00+07:00",
-    ditinjauPada: "2026-07-18T10:10:00+07:00",
-    dibuatPada: "2026-07-15T09:10:00+07:00",
-    diperbaruiPada: "2026-07-20T08:00:00+07:00",
-  },
-  {
-    namaLengkap: "Alya Putri",
+    waktu: "2026-07-15T09:10:00+07:00",
+  }),
+  anggota({
+    divisi: "Badan Pengurus Harian",
+    namaLengkap: "Siska Amelia",
     nis: "242510004",
     namaKelas: "XI-4",
-    jabatanOrganisasi: "Sekretaris I",
-    statusKeanggotaan: STATUS_KEANGGOTAAN.AKTIF,
-    email: "alya.putri@smamutiara2.sch.id",
-    nomorTelepon: "6281210000004",
-    bergabungPada: "2026-07-20T08:00:00+07:00",
-    diajukanPada: "2026-07-15T09:15:00+07:00",
-    ditinjauPada: "2026-07-18T10:15:00+07:00",
-    dibuatPada: "2026-07-15T09:15:00+07:00",
-    diperbaruiPada: "2026-07-20T08:00:00+07:00",
-  },
-  {
-    namaLengkap: "Citra Maharani",
-    nis: "242510005",
-    namaKelas: "XI-5",
-    jabatanOrganisasi: "Sekretaris II",
-    statusKeanggotaan: STATUS_KEANGGOTAAN.AKTIF,
-    email: "citra.maharani@smamutiara2.sch.id",
-    nomorTelepon: "6281210000005",
-    bergabungPada: "2026-07-20T08:00:00+07:00",
-    diajukanPada: "2026-07-15T09:20:00+07:00",
-    ditinjauPada: "2026-07-18T10:20:00+07:00",
-    dibuatPada: "2026-07-15T09:20:00+07:00",
-    diperbaruiPada: "2026-07-20T08:00:00+07:00",
-  },
-  {
-    namaLengkap: "Siska Amelia",
-    nis: "242510006",
-    namaKelas: "XI-6",
-    jabatanOrganisasi: "Bendahara I",
-    statusKeanggotaan: STATUS_KEANGGOTAAN.AKTIF,
+    jabatanOrganisasi: "Bendahara",
     email: "siska.amelia@smamutiara2.sch.id",
-    nomorTelepon: "6281210000006",
-    bergabungPada: "2026-07-20T08:00:00+07:00",
-    diajukanPada: "2026-07-15T09:25:00+07:00",
-    ditinjauPada: "2026-07-18T10:25:00+07:00",
-    dibuatPada: "2026-07-15T09:25:00+07:00",
-    diperbaruiPada: "2026-07-20T08:00:00+07:00",
-  },
-  {
-    namaLengkap: "Zahra Aulia",
-    nis: "242510007",
-    namaKelas: "XI-7",
-    jabatanOrganisasi: "Bendahara II",
-    statusKeanggotaan: STATUS_KEANGGOTAAN.AKTIF,
-    email: "zahra.aulia@smamutiara2.sch.id",
-    nomorTelepon: "6281210000007",
-    bergabungPada: "2026-07-20T08:00:00+07:00",
-    diajukanPada: "2026-07-15T09:30:00+07:00",
-    ditinjauPada: "2026-07-18T10:30:00+07:00",
-    dibuatPada: "2026-07-15T09:30:00+07:00",
-    diperbaruiPada: "2026-07-20T08:00:00+07:00",
-  },
+    nomorTelepon: "6281210000004",
+    waktu: "2026-07-15T09:15:00+07:00",
+  }),
 
   // =========================================================
-  // BEBERAPA KETUA SEKBID
+  // KEIMANAN DAN KETAKWAAN
   // =========================================================
-  {
+  anggota({
+    divisi: "Keimanan dan Ketakwaan",
     namaLengkap: "Bagus Nurrahman",
     nis: "242510101",
     namaKelas: "XI-1",
-    jabatanOrganisasi: "Ketua Sekbid I",
-    statusKeanggotaan: STATUS_KEANGGOTAAN.AKTIF,
+    jabatanOrganisasi: "Ketua",
     email: "bagus.nurrahman@smamutiara2.sch.id",
     nomorTelepon: "6281210000101",
-    bergabungPada: "2026-07-20T08:00:00+07:00",
-    diajukanPada: "2026-07-15T10:00:00+07:00",
-    ditinjauPada: "2026-07-18T11:00:00+07:00",
-    dibuatPada: "2026-07-15T10:00:00+07:00",
-    diperbaruiPada: "2026-07-20T08:00:00+07:00",
-  },
-  {
+    waktu: "2026-07-15T10:00:00+07:00",
+  }),
+  anggota({
+    divisi: "Keimanan dan Ketakwaan",
+    namaLengkap: "Raka Maulana",
+    nis: "242510105",
+    namaKelas: "XI-5",
+    jabatanOrganisasi: "Anggota",
+    email: "raka.maulana@smamutiara2.sch.id",
+    nomorTelepon: "6281210000105",
+    waktu: "2026-07-15T10:20:00+07:00",
+  }),
+  anggota({
+    divisi: "Keimanan dan Ketakwaan",
+    namaLengkap: "Nisa Rahmawati",
+    nis: "242510106",
+    namaKelas: "XI-6",
+    jabatanOrganisasi: "Anggota",
+    email: "nisa.rahmawati@smamutiara2.sch.id",
+    nomorTelepon: "6281210000106",
+    waktu: "2026-07-15T10:25:00+07:00",
+  }),
+
+  // =========================================================
+  // BUDI PEKERTI
+  // =========================================================
+  anggota({
+    divisi: "Budi Pekerti",
     namaLengkap: "Daffa Arini Winda",
     nis: "242510102",
     namaKelas: "XI-2",
-    jabatanOrganisasi: "Ketua Sekbid II",
-    statusKeanggotaan: STATUS_KEANGGOTAAN.AKTIF,
+    jabatanOrganisasi: "Ketua",
     email: "daffa.arini@smamutiara2.sch.id",
     nomorTelepon: "6281210000102",
-    bergabungPada: "2026-07-20T08:00:00+07:00",
-    diajukanPada: "2026-07-15T10:05:00+07:00",
-    ditinjauPada: "2026-07-18T11:05:00+07:00",
-    dibuatPada: "2026-07-15T10:05:00+07:00",
-    diperbaruiPada: "2026-07-20T08:00:00+07:00",
-  },
-  {
+    waktu: "2026-07-15T10:05:00+07:00",
+  }),
+  anggota({
+    divisi: "Budi Pekerti",
+    namaLengkap: "Fikri Hidayat",
+    nis: "242510107",
+    namaKelas: "XI-7",
+    jabatanOrganisasi: "Anggota",
+    email: "fikri.hidayat@smamutiara2.sch.id",
+    nomorTelepon: "6281210000107",
+    waktu: "2026-07-15T10:30:00+07:00",
+  }),
+  anggota({
+    divisi: "Budi Pekerti",
+    namaLengkap: "Salsa Anindita",
+    nis: "242510108",
+    namaKelas: "XI-8",
+    jabatanOrganisasi: "Anggota",
+    email: "salsa.anindita@smamutiara2.sch.id",
+    nomorTelepon: "6281210000108",
+    waktu: "2026-07-15T10:35:00+07:00",
+  }),
+
+  // =========================================================
+  // BELA NEGARA
+  // =========================================================
+  anggota({
+    divisi: "Bela Negara",
     namaLengkap: "Irfan Zea Kalisa",
     nis: "242510103",
     namaKelas: "XI-3",
-    jabatanOrganisasi: "Ketua Sekbid III",
-    statusKeanggotaan: STATUS_KEANGGOTAAN.AKTIF,
+    jabatanOrganisasi: "Ketua",
     email: "irfan.zea@smamutiara2.sch.id",
     nomorTelepon: "6281210000103",
-    bergabungPada: "2026-07-20T08:00:00+07:00",
-    diajukanPada: "2026-07-15T10:10:00+07:00",
-    ditinjauPada: "2026-07-18T11:10:00+07:00",
-    dibuatPada: "2026-07-15T10:10:00+07:00",
-    diperbaruiPada: "2026-07-20T08:00:00+07:00",
-  },
-  {
+    waktu: "2026-07-15T10:10:00+07:00",
+  }),
+  anggota({
+    divisi: "Bela Negara",
+    namaLengkap: "Dimas Saputra",
+    nis: "242510109",
+    namaKelas: "XI-9",
+    jabatanOrganisasi: "Anggota",
+    email: "dimas.saputra@smamutiara2.sch.id",
+    nomorTelepon: "6281210000109",
+    waktu: "2026-07-15T10:40:00+07:00",
+  }),
+  anggota({
+    divisi: "Bela Negara",
+    namaLengkap: "Putri Lestari",
+    nis: "242510110",
+    namaKelas: "XI-10",
+    jabatanOrganisasi: "Anggota",
+    email: "putri.lestari@smamutiara2.sch.id",
+    nomorTelepon: "6281210000110",
+    waktu: "2026-07-15T10:45:00+07:00",
+  }),
+
+  // =========================================================
+  // AKADEMIK DAN PRESTASI
+  // =========================================================
+  anggota({
+    divisi: "Akademik dan Prestasi",
     namaLengkap: "Rendra Anggila Alfiya",
     nis: "242510104",
     namaKelas: "XI-4",
-    jabatanOrganisasi: "Ketua Sekbid IV",
-    statusKeanggotaan: STATUS_KEANGGOTAAN.AKTIF,
+    jabatanOrganisasi: "Ketua",
     email: "rendra.anggila@smamutiara2.sch.id",
     nomorTelepon: "6281210000104",
-    bergabungPada: "2026-07-20T08:00:00+07:00",
-    diajukanPada: "2026-07-15T10:15:00+07:00",
-    ditinjauPada: "2026-07-18T11:15:00+07:00",
-    dibuatPada: "2026-07-15T10:15:00+07:00",
-    diperbaruiPada: "2026-07-20T08:00:00+07:00",
-  },
+    waktu: "2026-07-15T10:15:00+07:00",
+  }),
+  anggota({
+    divisi: "Akademik dan Prestasi",
+    namaLengkap: "Kevin Ramadhan",
+    nis: "242510111",
+    namaKelas: "XI-11",
+    jabatanOrganisasi: "Anggota",
+    email: "kevin.ramadhan@smamutiara2.sch.id",
+    nomorTelepon: "6281210000111",
+    waktu: "2026-07-15T10:50:00+07:00",
+  }),
+  anggota({
+    divisi: "Akademik dan Prestasi",
+    namaLengkap: "Maya Puspita",
+    nis: "242510112",
+    namaKelas: "XI-12",
+    jabatanOrganisasi: "Anggota",
+    email: "maya.puspita@smamutiara2.sch.id",
+    nomorTelepon: "6281210000112",
+    waktu: "2026-07-15T10:55:00+07:00",
+  }),
 ];

@@ -132,7 +132,7 @@ export default function PendingReviewSection({ members = [] }) {
                           </p>
                           <p className="mt-1 text-xs text-text-muted">
                             {member.divisi
-                              ? `Sekbid ${member.divisi.kode}: ${member.divisi.namaSingkat}`
+                              ? (member.divisi.namaSingkat || member.divisi.nama || "-")
                               : "Belum memilih sekbid"}
                           </p>
                         </td>
