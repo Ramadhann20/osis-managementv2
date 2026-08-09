@@ -55,8 +55,12 @@ export default function LoginPage() {
     <main className="flex min-h-screen items-center justify-center bg-surface px-6 py-10">
       <section className="w-full max-w-md rounded-2xl border border-border bg-card p-8 shadow-lg">
         <div className="mb-8 flex justify-center">
-          <div className="flex h-20 w-20 items-center justify-center rounded-full bg-primary text-2xl font-bold text-white">
-            RP
+          <div className="h-20 w-20 overflow-hidden rounded-full border border-border bg-white shadow-sm">
+            <img
+              src="/images/logo-osis-mutiara.jpeg"
+              alt="Logo OSIS SMA Mutiara"
+              className="h-full w-full object-contain"
+            />
           </div>
         </div>
 
