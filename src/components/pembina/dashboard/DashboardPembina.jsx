@@ -108,70 +108,85 @@ export default function DashboardPembina() {
       activityRows.map((item) => [item.id, item])
     );
 
+    const statusMember = (item) =>
+      item?.statusKeanggotaan || item?.membershipStatus || null;
     const official = memberRows.filter((item) =>
-      ["active", "inactive", "suspended"].includes(
-        item.membershipStatus
+      ["aktif", "nonaktif", "ditangguhkan", "active", "inactive", "suspended"].includes(
+        statusMember(item)
       )
     );
-    const active = official.filter(
-      (item) => item.membershipStatus === "active"
+    const active = official.filter((item) =>
+      ["aktif", "active"].includes(statusMember(item))
     );
-    const pending = memberRows.filter(
-      (item) => item.membershipStatus === "pending_review"
+    const pending = memberRows.filter((item) =>
+      ["menunggu_review", "pending_review"].includes(statusMember(item))
     );
     const activeActivities = activityRows.filter((item) =>
-      ["upcoming", "ongoing"].includes(item.status)
+      ["akan_datang", "berlangsung", "upcoming", "ongoing"].includes(item.status)
     );
     const proposalActions = proposalRows.filter((item) =>
-      ["pending_review", "revision_required"].includes(item.status)
+      ["menunggu_review", "perlu_revisi", "pending_review", "revision_required"].includes(item.status)
     );
 
-    const latestSummary = sortDateDesc(summaryRows, "updatedAt")[0];
+    const latestSummary = sortDateDesc(
+      summaryRows,
+      "diperbaruiPada"
+    )[0] || sortDateDesc(summaryRows, "updatedAt")[0];
     const attendancePercentage =
+      latestSummary?.persentaseKehadiran ??
       latestSummary?.attendancePercentage ??
-      calculateAttendance(sessionRows, attendanceRows);
+      calculateAttendance(sessionRows, attendanceRows, activityMap);
 
     const openSessions = sortDateDesc(
-      sessionRows.filter((item) => item.status === "open"),
-      "openedAt"
+      sessionRows.filter((item) => ["dibuka", "open"].includes(item.status)),
+      "waktuMulai"
     ).map((item) => ({
       ...item,
-      activity: activityMap.get(item.activityId) || null,
+      startAt: item.waktuMulai || item.startAt || null,
+      activity:
+        activityMap.get(item.idKegiatan || item.activityId) || null,
     }));
 
     const upcoming = sortDateAsc(
       activityRows.filter((item) =>
-        ["upcoming", "ongoing"].includes(item.status)
+        ["akan_datang", "berlangsung", "upcoming", "ongoing"].includes(item.status)
       ),
-      "startAt"
+      "waktuMulai"
     )
       .slice(0, 5)
       .map((item) => ({
         ...item,
-        division: divisionMap.get(item.divisionId) || null,
+        title: item.namaKegiatan || item.title || "Kegiatan",
+        startAt: item.waktuMulai || item.startAt || null,
+        location: item.lokasi || item.location || "-",
+        division: divisionMap.get(item.idDivisi || item.divisionId) || null,
       }));
 
     const registrations = sortDateDesc(
       memberRows.filter((item) =>
-        ["pending_review", "rejected"].includes(item.membershipStatus)
+        ["menunggu_review", "ditolak", "pending_review", "rejected"].includes(
+          statusMember(item)
+        )
       ),
-      "submittedAt"
+      "diajukanPada"
     )
       .slice(0, 5)
       .map((item) => ({
         ...item,
-        division: divisionMap.get(item.divisionId) || null,
+        division: divisionMap.get(item.idDivisi || item.divisionId) || null,
       }));
 
     const latestProposals = sortDateDesc(
       proposalRows,
-      "submittedAt"
+      "diajukanPada"
     )
       .slice(0, 5)
       .map((item) => ({
         ...item,
-        member: memberMap.get(item.uploadedBy) || null,
-        activity: activityMap.get(item.activityId) || null,
+        title: item.namaKegiatan || "Proposal Kegiatan",
+        submittedAt: item.diajukanPada || item.submittedAt || null,
+        member: memberMap.get(item.idPengunggah || item.uploadedBy) || null,
+        activity: activityMap.get(item.idKegiatan || item.activityId) || null,
       }));
 
     const latestAnnouncements = sortDateDesc(
@@ -196,7 +211,7 @@ export default function DashboardPembina() {
         (item) => item.isActive !== false
       ).length,
       inactiveCount: official.filter(
-        (item) => item.membershipStatus !== "active"
+        (item) => !["aktif", "active"].includes(statusMember(item))
       ).length,
     };
   }, [
@@ -504,48 +519,74 @@ export default function DashboardPembina() {
   );
 }
 
-function calculateAttendance(sessions, records) {
-  const closed = sessions.filter((item) => item.status === "closed");
-  const expected = closed.reduce(
-    (total, item) => total + (item.expectedMemberIds?.length || 0),
-    0
+function expectedParticipantIds(activity) {
+  const ids = new Set(
+    Array.isArray(activity?.pesertaFinal?.idAnggota)
+      ? activity.pesertaFinal.idAnggota
+      : []
   );
+  if (activity?.idPenanggungJawab) ids.add(activity.idPenanggungJawab);
+  if (Array.isArray(activity?.idAnggotaPanitia)) {
+    activity.idAnggotaPanitia.forEach((id) => id && ids.add(id));
+  }
+  return Array.from(ids);
+}
 
-  if (!expected) return 0;
+function attendanceRecordStatus(record) {
+  const value = String(record?.statusKehadiran ?? record?.status ?? "").toLowerCase();
+  if (["hadir", "present"].includes(value)) return "hadir";
+  if (["terlambat", "late"].includes(value)) return "terlambat";
+  return value;
+}
 
-  const ids = new Set(closed.map((item) => item.id));
-  const present = records.filter(
-    (item) =>
-      ids.has(item.sessionId) &&
-      ["present", "late"].includes(item.status)
-  ).length;
+function calculateAttendance(sessions, records, activityMap) {
+  const closed = sessions.filter((item) =>
+    ["ditutup", "closed"].includes(item.status)
+  );
+  let expected = 0;
+  let present = 0;
 
-  return (present / expected) * 100;
+  closed.forEach((session) => {
+    const activity = activityMap.get(session.idKegiatan || session.activityId);
+    const expectedIds = expectedParticipantIds(activity);
+    expected += expectedIds.length;
+
+    const sessionRows = records.filter(
+      (record) =>
+        (record.idSesi || record.sessionId) === session.id &&
+        (!record.statusVerifikasi || record.statusVerifikasi === "dikonfirmasi")
+    );
+    present += sessionRows.filter((record) =>
+      ["hadir", "terlambat"].includes(attendanceRecordStatus(record))
+    ).length;
+  });
+
+  return expected ? (present / expected) * 100 : 0;
 }
 
 function buildTrend(sessions, records, activityMap) {
   return sortDateDesc(
-    sessions.filter((item) => item.status === "closed"),
-    "startAt"
+    sessions.filter((item) => ["ditutup", "closed"].includes(item.status)),
+    "waktuMulai"
   )
     .slice(0, 6)
     .reverse()
     .map((session) => {
-      const expected = session.expectedMemberIds?.length || 0;
+      const activity = activityMap.get(session.idKegiatan || session.activityId);
+      const expected = expectedParticipantIds(activity).length;
       const sessionRows = records.filter(
-        (item) => item.sessionId === session.id
+        (record) =>
+          (record.idSesi || record.sessionId) === session.id &&
+          (!record.statusVerifikasi || record.statusVerifikasi === "dikonfirmasi")
       );
-      const present = sessionRows.filter((item) =>
-        ["present", "late"].includes(item.status)
+      const present = sessionRows.filter((record) =>
+        ["hadir", "terlambat"].includes(attendanceRecordStatus(record))
       ).length;
 
       return {
         id: session.id,
-        title:
-          activityMap.get(session.activityId)?.title ||
-          session.title ||
-          "Kegiatan",
-        date: session.startAt || session.sessionDate,
+        title: activity?.namaKegiatan || activity?.title || "Kegiatan",
+        date: session.waktuMulai || session.startAt || session.tanggal,
         percentage: expected ? percentage((present / expected) * 100) : 0,
       };
     });
@@ -585,11 +626,11 @@ function ActiveSession({ session }) {
             Sesi Absensi Sedang Dibuka
           </p>
           <h2 className="mt-2 text-xl font-bold">
-            {session.activity?.title || session.title}
+            {session.activity?.namaKegiatan || session.activity?.title || session.title || "Kegiatan"}
           </h2>
           <p className="mt-2 text-sm opacity-80">
-            {formatDateTime(session.startAt)} ·{" "}
-            {session.activity?.location || "-"}
+            {formatDateTime(session.waktuMulai || session.startAt)} ·{" "}
+            {session.activity?.lokasi || session.activity?.location || "-"}
           </p>
         </div>
 

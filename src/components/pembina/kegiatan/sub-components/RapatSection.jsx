@@ -2,10 +2,7 @@
 
 import AppIcon from "@/components/global/AppIcon";
 import { formatDateTime } from "@/components/pembina/_shared/firestoreHelpers";
-import {
-  DisabledAction,
-  EmptyState,
-} from "@/components/pembina/_shared/PembinaUi";
+import { EmptyState } from "@/components/pembina/_shared/PembinaUi";
 import {
   KegiatanFilterBar,
   KegiatanMeta,
@@ -95,70 +92,68 @@ export default function RapatSection({
             );
 
             return (
-              <article
+              <button
                 key={activity.id}
-                className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm transition duration-300 hover:-translate-y-0.5 hover:shadow-md"
+                type="button"
+                onClick={() => onOpenDetail?.(activity)}
+                className="w-full overflow-hidden rounded-2xl border border-border bg-card text-left shadow-sm transition duration-300 hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
+                aria-label={`Buka detail ${activity.namaKegiatan || "rapat"}`}
               >
                 <div className="border-b border-border p-5">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="rounded-full bg-blue-50 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-blue-700">Rapat</span>
-                        <BadgeStatus status={activity.status} />
-                      </div>
-                      <h2 className="mt-3 font-bold text-text">{activity.namaKegiatan || "Rapat tanpa judul"}</h2>
-                      <p className="mt-2 max-h-12 overflow-hidden text-sm leading-6 text-text-muted">{activity.deskripsi || "Tidak ada agenda atau deskripsi."}</p>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded-full bg-blue-50 px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-blue-700">
+                        Rapat
+                      </span>
+                      <BadgeStatus status={activity.status} />
                     </div>
-
-                    <button
-                      type="button"
-                      onClick={() => onOpenDetail?.(activity)}
-                      aria-label="Lihat detail rapat"
-                      className="rounded-lg p-2 text-text-muted transition hover:bg-surface hover:text-primary"
-                    >
-                      <AppIcon name="more_vert" size={20} />
-                    </button>
+                    <h2 className="mt-3 font-bold text-text">
+                      {activity.namaKegiatan || "Rapat tanpa judul"}
+                    </h2>
+                    <p className="mt-2 max-h-12 overflow-hidden text-sm leading-6 text-text-muted">
+                      {activity.deskripsi || "Tidak ada agenda atau deskripsi."}
+                    </p>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 gap-4 p-5 sm:grid-cols-2">
-                  <KegiatanMeta label="Waktu Rapat" value={formatDateTime(activity.waktuMulai)} />
+                  <KegiatanMeta
+                    label="Waktu Rapat"
+                    value={formatDateTime(activity.waktuMulai)}
+                  />
                   <KegiatanMeta label="Lokasi" value={activity.lokasi || "-"} />
-                  <KegiatanMeta label="Penyelenggara" value={labelPenyelenggara(activity)} />
-                  <KegiatanMeta label="Sesi Absensi" value={`${activity.jumlahSesiAbsensi || 0} sesi`} />
+                  <KegiatanMeta
+                    label="Penyelenggara"
+                    value={labelPenyelenggara(activity)}
+                  />
+                  <KegiatanMeta
+                    label="Sesi Absensi"
+                    value={`${activity.jumlahSesiAbsensi || 0} sesi`}
+                  />
                 </div>
 
-                <div className="flex flex-col gap-3 border-t border-border bg-surface p-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {participantCount > 0 && (
-                      <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[10px] font-bold text-blue-700 ring-1 ring-inset ring-blue-200">
-                        {participantCount} peserta final
-                      </span>
-                    )}
-                    {activity.statusJadwal === "difinalisasi" && (
-                      <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-bold text-emerald-700 ring-1 ring-inset ring-emerald-200">Jadwal ditetapkan</span>
-                    )}
-                  </div>
-
-                  <div className="flex flex-wrap gap-2 sm:justify-end">
-                    <button
-                      type="button"
-                      onClick={() => onOpenDetail?.(activity)}
-                      className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-border bg-card px-4 text-sm font-bold text-text transition hover:border-primary/40 hover:text-primary"
-                    >
-                      <AppIcon name="visibility" size={17} />
-                      Detail
-                    </button>
-                    <DisabledAction icon="edit" variant="outline">Edit</DisabledAction>
-                    <DisabledAction icon="block" variant="danger">Batalkan</DisabledAction>
-                  </div>
+                <div className="flex flex-wrap items-center gap-2 border-t border-border bg-surface p-4">
+                  {participantCount > 0 && (
+                    <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[10px] font-bold text-blue-700 ring-1 ring-inset ring-blue-200">
+                      {participantCount} peserta final
+                    </span>
+                  )}
+                  {activity.statusJadwal === "difinalisasi" && (
+                    <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-bold text-emerald-700 ring-1 ring-inset ring-emerald-200">
+                      Jadwal ditetapkan
+                    </span>
+                  )}
                 </div>
-              </article>
+              </button>
             );
           })}
         </section>
       ) : (
-        <EmptyState icon="groups" title="Rapat tidak ditemukan" description="Coba ubah pencarian atau filter status." />
+        <EmptyState
+          icon="groups"
+          title="Rapat tidak ditemukan"
+          description="Coba ubah pencarian atau filter status."
+        />
       )}
     </div>
   );

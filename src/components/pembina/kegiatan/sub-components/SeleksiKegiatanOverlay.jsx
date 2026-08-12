@@ -987,8 +987,11 @@ export default function SeleksiKegiatanModal({
       return;
     }
 
-    const shouldFinalizeWorkProgram =
-      activityType === JENIS_KEGIATAN.PROGRAM_KERJA && hasSelectedProposal;
+    // Program Kerja tidak lagi difinalisasi dari modal pembuatan.
+    // Walaupun Proposal sudah dipilih oleh Pembina, kegiatan tetap disimpan
+    // sebagai TERENCANA. Finalisasi peserta, jadwal, dan pembuatan sesi hanya
+    // dilakukan dari Detail Kegiatan setelah Proposal tersedia.
+    const shouldFinalizeWorkProgram = false;
 
     if (shouldFinalizeWorkProgram) {
       if (!form.finalStartDate || !form.finalEndDate || !hasValidFinalDateRange) {
@@ -1120,16 +1123,12 @@ export default function SeleksiKegiatanModal({
 
     const resolvedFinalSchedulePayload =
       activityType === JENIS_KEGIATAN.PROGRAM_KERJA
-        ? hasSelectedProposal
-          ? makeSchedulePayload(finalScheduleForm, finalBaseSessions)
-          : null
+        ? null
         : makeSchedulePayload(form, baseSessions);
 
     const resolvedFinalRecurrencePayload =
       activityType === JENIS_KEGIATAN.PROGRAM_KERJA
-        ? hasSelectedProposal
-          ? makeRecurrencePayload(finalScheduleForm)
-          : null
+        ? null
         : makeRecurrencePayload(form);
 
     const snapshotJadwalProposal =
@@ -1202,22 +1201,16 @@ export default function SeleksiKegiatanModal({
         pengulanganFinal: resolvedFinalRecurrencePayload,
         statusJadwal:
           activityType === JENIS_KEGIATAN.PROGRAM_KERJA
-            ? hasSelectedProposal
-              ? STATUS_JADWAL.DIFINALISASI
-              : STATUS_JADWAL.DIRENCANAKAN
+            ? STATUS_JADWAL.DIRENCANAKAN
             : STATUS_JADWAL.DIFINALISASI,
         sumberFinalisasiJadwal:
-          activityType === JENIS_KEGIATAN.PROGRAM_KERJA && hasSelectedProposal
-            ? sumberFinalisasiJadwal
-            : activityType === JENIS_KEGIATAN.RAPAT
-              ? SUMBER_FINALISASI_JADWAL.LANGSUNG
-              : null,
+          activityType === JENIS_KEGIATAN.RAPAT
+            ? SUMBER_FINALISASI_JADWAL.LANGSUNG
+            : null,
         difinalisasiPada:
-          activityType === JENIS_KEGIATAN.PROGRAM_KERJA && hasSelectedProposal
+          activityType === JENIS_KEGIATAN.RAPAT
             ? serverTimestamp()
-            : activityType === JENIS_KEGIATAN.RAPAT
-              ? serverTimestamp()
-              : null,
+            : null,
 
         idDivisi: form.divisionId || null,
         idPenanggungJawab: form.organiserMemberId || null,
@@ -1242,17 +1235,13 @@ export default function SeleksiKegiatanModal({
         statusTim:
           activityType === JENIS_KEGIATAN.PROGRAM_KERJA
             ? hasSelectedProposal
-              ? form.organiserMemberId || form.committeeMemberIds.length
-                ? STATUS_TIM.DIFINALISASI_PEMBINA
-                : STATUS_TIM.MENUNGGU_FINALISASI
+              ? STATUS_TIM.MENUNGGU_FINALISASI
               : STATUS_TIM.BELUM_DIAJUKAN
             : null,
 
         status:
           activityType === JENIS_KEGIATAN.PROGRAM_KERJA
-            ? hasSelectedProposal
-              ? STATUS_KEGIATAN.AKAN_DATANG
-              : STATUS_KEGIATAN.TERENCANA
+            ? STATUS_KEGIATAN.TERENCANA
             : STATUS_KEGIATAN.DRAF,
         statusLaporan:
           activityType === JENIS_KEGIATAN.PROGRAM_KERJA
@@ -1842,7 +1831,7 @@ export default function SeleksiKegiatanModal({
                           )}
 
                           {activityType === JENIS_KEGIATAN.PROGRAM_KERJA && (
-                            <ProgressiveSection open={hasSelectedProposal}>
+                            <ProgressiveSection open={false}>
                               <div className="mt-6 border-t border-border pt-6">
                                 <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                                   <div>
@@ -2230,7 +2219,7 @@ export default function SeleksiKegiatanModal({
                           )}
 
                           {activityType === JENIS_KEGIATAN.PROGRAM_KERJA && (
-                            <ProgressiveSection open={hasSelectedProposal}>
+                            <ProgressiveSection open={false}>
                               <div className="mt-6 border-t border-border pt-6">
                                 <div className="mb-5">
                                   <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">
@@ -2405,22 +2394,14 @@ export default function SeleksiKegiatanModal({
 
                     <button
                       type="submit"
-                      disabled={
-                        saving ||
-                        !hasValidAttendanceSchedule ||
-                        (activityType === JENIS_KEGIATAN.PROGRAM_KERJA &&
-                          hasSelectedProposal &&
-                          !hasValidFinalAttendanceSchedule)
-                      }
+                      disabled={saving || !hasValidAttendanceSchedule}
                       className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-semibold text-white shadow-sm transition duration-300 ease-out hover:-translate-y-0.5 hover:bg-primary-hover hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0"
                     >
                       <AppIcon name="check" size={18} />
                       {saving
                         ? "Menyimpan..."
                         : activityType === JENIS_KEGIATAN.PROGRAM_KERJA
-                          ? hasSelectedProposal
-                            ? "Finalisasi & Simpan"
-                            : "Simpan sebagai Terencana"
+                          ? "Simpan sebagai Terencana"
                           : "Simpan Meeting"}
                     </button>
                   </footer>

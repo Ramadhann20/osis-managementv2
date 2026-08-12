@@ -228,11 +228,15 @@ export async function finalisasiKegiatan({
   }
 
   const isProgramKerja = activity.jenisKegiatan === JENIS_KEGIATAN.PROGRAM_KERJA;
-  if (
-    isProgramKerja &&
-    (proposal?.status || activity?.statusProposal) !== STATUS_PROPOSAL.DISETUJUI
-  ) {
-    throw new Error("Proposal harus disetujui terlebih dahulu.");
+  // Program Kerja tetap wajib mempunyai Proposal, tetapi persetujuan Proposal
+  // disatukan dengan tombol final "Setujui & Finalisasi Kegiatan".
+  // Karena itu Proposal tidak perlu lebih dulu berstatus disetujui.
+  if (isProgramKerja && !proposal?.id) {
+    throw new Error("Proposal harus tersedia sebelum kegiatan difinalisasi.");
+  }
+
+  if (isProgramKerja && proposal?.status === STATUS_PROPOSAL.DITOLAK) {
+    throw new Error("Proposal yang sudah ditolak tidak dapat difinalisasi.");
   }
 
   const existingExecution = await getDocs(
@@ -294,6 +298,10 @@ export async function finalisasiKegiatan({
           waktuMulai: session.startAt,
           waktuSelesai: session.endAt,
           durasiMenit: session.durationMinutes,
+          // Snapshot peserta disimpan juga di sesi sebagai fallback. Source of
+          // truth tetap Kegiatan.pesertaFinal, tetapi field ini membantu query
+          // absensi tanpa harus menebak peserta ketika struktur berubah.
+          idAnggotaPeserta: ids,
           status: STATUS_SESI_ABSENSI.TERJADWAL,
           dibuatPada: waktu,
           diperbaruiPada: waktu,
@@ -347,7 +355,7 @@ export async function finalisasiKegiatan({
       jumlahPelaksanaan: occurrences.length,
       jumlahSesiAbsensi: totalSessions,
       kapasitasPeserta: ids.length,
-      jumlahPeserta: 0,
+      jumlahPeserta: ids.length,
       pesertaFinal: {
         idAnggota: ids,
         jumlahPeserta: ids.length,
@@ -391,6 +399,16 @@ export async function finalisasiKegiatan({
     }
 
     await updateDoc(KOLEKSI.KEGIATAN, activity.id, updatePayload);
+
+    // Persetujuan Proposal dilakukan pada transaksi bisnis yang sama dengan
+    // finalisasi kegiatan. Dokumen Proposal tetap dipertahankan sebagai histori.
+    if (isProgramKerja && proposal?.id) {
+      await updateDoc(KOLEKSI.PROPOSAL, proposal.id, {
+        status: STATUS_PROPOSAL.DISETUJUI,
+        disetujuiPada: waktu,
+        diperbaruiPada: waktu,
+      });
+    }
 
     return {
       jumlahPelaksanaan: occurrences.length,

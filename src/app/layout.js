@@ -8,7 +8,7 @@ import Authenticator from "@/components/auth/Authenticator";
 
 import { OverlayProvider } from "@/context/ui/OverlayContext";
 
-
+import DevTools from "@/components/dev/DevTools";
 
 export const metadata = {
   title: "SIM Osis | SMA Mutiara 2",
@@ -24,7 +24,10 @@ export default function RootLayout({ children }) {
           
           <Authenticator>
             
-              <OverlayProvider>{children}</OverlayProvider>
+              <OverlayProvider>
+                <DevTools />
+                {children}
+              </OverlayProvider>
 
           </Authenticator>
 

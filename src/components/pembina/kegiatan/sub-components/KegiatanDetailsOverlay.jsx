@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import AppIcon from "@/components/global/AppIcon";
 import { useDb } from "@/context/DbContext";
@@ -9,8 +9,11 @@ import { useCollection } from "@/hooks/useCollection";
 import { formatDateTime } from "@/components/pembina/_shared/firestoreHelpers";
 import {
   JENIS_KEGIATAN,
+  STATUS_KEANGGOTAAN,
   STATUS_KEGIATAN,
   STATUS_PROPOSAL,
+  STATUS_TIM,
+  SUMBER_FINALISASI_JADWAL,
 } from "../konfigurasiManajemenKegiatan";
 import PilihPesertaKegiatanOverlay from "./PilihPesertaKegiatanOverlay";
 import { finalisasiKegiatan } from "./finalisasiKegiatan";
@@ -25,6 +28,30 @@ function toDate(value) {
   if (typeof value?.toDate === "function") return value.toDate();
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function pad(value) {
+  return String(value).padStart(2, "0");
+}
+
+function toDateKey(value) {
+  const date = toDate(value);
+  if (!date) return "";
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function toTimeKey(value) {
+  const date = toDate(value);
+  if (!date) return "";
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function shiftDateKey(value, days) {
+  if (!value) return value;
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+  date.setDate(date.getDate() + Number(days || 0));
+  return toDateKey(date);
 }
 
 function labelDivisi(divisi) {
@@ -87,12 +114,92 @@ function formatBytes(bytes) {
   return `${(value / 1024 ** 2).toFixed(1)} MB`;
 }
 
-function snapshotMap(usulanPeserta) {
+function snapshotMap(source) {
   return new Map(
-    (Array.isArray(usulanPeserta?.daftar) ? usulanPeserta.daftar : [])
+    (Array.isArray(source?.daftar) ? source.daftar : [])
       .filter((item) => item?.idAnggota)
       .map((item) => [item.idAnggota, item])
   );
+}
+
+function isActiveMember(member) {
+  const status = String(
+    member?.statusKeanggotaan ?? member?.membershipStatus ?? ""
+  )
+    .trim()
+    .toLowerCase();
+
+  return status === STATUS_KEANGGOTAAN.AKTIF || status === "active";
+}
+
+function buildScheduleDraft(activity) {
+  const schedule = activity?.jadwalFinal || activity?.jadwalRencana || null;
+  const start = toDate(activity?.waktuMulai);
+  const end = toDate(activity?.waktuSelesai);
+
+  const templates = Array.isArray(schedule?.templateSesi)
+    ? schedule.templateSesi
+    : [
+        {
+          selisihHari: 0,
+          jamMulai: toTimeKey(start),
+          jamSelesai: toTimeKey(end),
+          durasiMenit: Number(activity?.durasiMenit || 0),
+        },
+      ];
+
+  return {
+    tanggalMulaiPertama:
+      schedule?.tanggalMulaiPertama || toDateKey(start) || "",
+    tanggalSelesaiPertama:
+      schedule?.tanggalSelesaiPertama || toDateKey(end || start) || "",
+    templateSesi: templates.map((item, index) => ({
+      selisihHari: Number(item?.selisihHari ?? index ?? 0),
+      jamMulai: item?.jamMulai || "",
+      jamSelesai: item?.jamSelesai || "",
+      durasiMenit: Number(item?.durasiMenit || 0),
+    })),
+  };
+}
+
+function buildFinalSchedule(activity, draft) {
+  const base = activity?.jadwalFinal || activity?.jadwalRencana || {};
+  const originalStart = base?.tanggalMulaiPertama || draft.tanggalMulaiPertama;
+  const originalEnd = base?.tanggalSelesaiPertama || originalStart;
+
+  let dayDifference = 0;
+  if (originalStart && originalEnd) {
+    const start = new Date(`${originalStart}T00:00:00`);
+    const end = new Date(`${originalEnd}T00:00:00`);
+    if (!Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())) {
+      dayDifference = Math.max(
+        0,
+        Math.round((end.getTime() - start.getTime()) / 86400000)
+      );
+    }
+  }
+
+  return {
+    ...base,
+    tanggalMulaiPertama: draft.tanggalMulaiPertama,
+    tanggalSelesaiPertama: shiftDateKey(
+      draft.tanggalMulaiPertama,
+      dayDifference
+    ),
+    templateSesi: draft.templateSesi.map((item) => ({
+      ...item,
+      durasiMenit: hitungDurasiMenit(item.jamMulai, item.jamSelesai),
+    })),
+  };
+}
+
+function hitungDurasiMenit(jamMulai, jamSelesai) {
+  if (!jamMulai || !jamSelesai) return 0;
+  const [startHour, startMinute] = jamMulai.split(":").map(Number);
+  const [endHour, endMinute] = jamSelesai.split(":").map(Number);
+  const start = startHour * 60 + startMinute;
+  const end = endHour * 60 + endMinute;
+  return end > start ? end - start : 0;
 }
 
 export function useKegiatanDetailsOverlay() {
@@ -122,8 +229,8 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
   const { db, colRef, updateDoc, serverTimestamp } = useDb();
   const [visible, setVisible] = useState(false);
   const [proposal, setProposal] = useState(activity?.proposal || null);
-  const [reviewing, setReviewing] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
   const [finalized, setFinalized] = useState(
     [
       STATUS_KEGIATAN.AKAN_DATANG,
@@ -132,31 +239,17 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
     ].includes(activity?.status)
   );
   const [participantPickerMode, setParticipantPickerMode] = useState(null);
-  const [selectedParticipantIds, setSelectedParticipantIds] = useState(() =>
-    new Set(
-      activity?.pesertaFinal?.idAnggota ||
-        activity?.usulanPeserta?.idAnggota ||
-        []
-    )
+  const [selectedParticipantIds, setSelectedParticipantIds] = useState(
+    () => new Set()
   );
-  const [participantSource, setParticipantSource] = useState(() => {
-    if (activity?.pesertaFinal) {
-      return {
-        label:
-          activity.pesertaFinal.sumber === "usulan_anggota"
-            ? "Usulan Anggota"
-            : "Ditentukan Pembina",
-      };
-    }
-    if (activity?.usulanPeserta) {
-      return {
-        label: activity.usulanPeserta.labelKelompok || "Usulan Anggota",
-      };
-    }
-    return null;
-  });
+  const [participantSource, setParticipantSource] = useState(null);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [scheduleDraft, setScheduleDraft] = useState(() =>
+    buildScheduleDraft(activity)
+  );
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const participantsInitialized = useRef(false);
 
   const anggota = useCollection(() => colRef("Anggota"), [], { enabled: true });
   const divisi = useCollection(() => colRef("Divisi"), [], { enabled: true });
@@ -166,17 +259,88 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
     return () => window.cancelAnimationFrame(frame);
   }, []);
 
+  const memberRows = rowsOf(anggota);
   const memberMap = useMemo(
-    () => new Map(rowsOf(anggota).map((item) => [item.id, item])),
-    [anggota]
+    () => new Map(memberRows.map((item) => [item.id, item])),
+    [memberRows]
   );
   const divisionMap = useMemo(
     () => new Map(rowsOf(divisi).map((item) => [item.id, item])),
     [divisi]
   );
+
+  const isMeeting = activity?.jenisKegiatan === JENIS_KEGIATAN.RAPAT;
+  const isProgramKerja = !isMeeting;
+  const proposalAvailable = isMeeting || Boolean(proposal?.id);
+  const showFinalizationSections = isMeeting || Boolean(proposal?.id);
+
+  // -------------------------------------------------------------------------
+  // DEFAULT PESERTA
+  // -------------------------------------------------------------------------
+  // Prioritas default:
+  // 1. pesertaFinal jika kegiatan sudah pernah difinalisasi;
+  // 2. usulanPeserta / pesertaRencana jika pengaju mengirim daftar;
+  // 3. jika Proposal Program Kerja tidak mengusulkan peserta, load seluruh
+  //    anggota aktif dari Sekbid kegiatan pada periode yang sama.
+  useEffect(() => {
+    if (participantsInitialized.current) return;
+    if (!showFinalizationSections) return;
+    if (!memberRows.length) return;
+
+    const finalIds = Array.isArray(activity?.pesertaFinal?.idAnggota)
+      ? activity.pesertaFinal.idAnggota
+      : [];
+    const suggestedIds = Array.isArray(activity?.usulanPeserta?.idAnggota)
+      ? activity.usulanPeserta.idAnggota
+      : Array.isArray(activity?.pesertaRencana?.idAnggota)
+        ? activity.pesertaRencana.idAnggota
+        : [];
+
+    if (finalIds.length) {
+      setSelectedParticipantIds(new Set(finalIds));
+      setParticipantSource({ label: "Peserta Final" });
+    } else if (suggestedIds.length) {
+      setSelectedParticipantIds(new Set(suggestedIds));
+      setParticipantSource({
+        label: isMeeting ? "Peserta Pengajuan Rapat" : "Usulan Anggota",
+      });
+    } else if (isProgramKerja && proposal?.id) {
+      const defaultIds = memberRows
+        .filter(isActiveMember)
+        .filter((member) => {
+          const idDivisi = member?.idDivisi ?? member?.divisionId ?? null;
+          const idPeriode = member?.idPeriode ?? member?.periodId ?? null;
+          const sameDivision =
+            Boolean(activity?.idDivisi) && idDivisi === activity.idDivisi;
+          const samePeriod =
+            !activity?.idPeriode || !idPeriode || idPeriode === activity.idPeriode;
+          return sameDivision && samePeriod;
+        })
+        .map((member) => member.id)
+        .filter(Boolean);
+
+      setSelectedParticipantIds(new Set(defaultIds));
+      setParticipantSource({ label: "Seluruh Anggota Sekbid" });
+    }
+
+    participantsInitialized.current = true;
+  }, [
+    showFinalizationSections,
+    memberRows,
+    proposal?.id,
+    isProgramKerja,
+    isMeeting,
+    activity?.idDivisi,
+    activity?.idPeriode,
+    activity?.pesertaFinal,
+    activity?.usulanPeserta,
+    activity?.pesertaRencana,
+  ]);
+
+  const sourceSnapshot = activity?.usulanPeserta || activity?.pesertaRencana;
   const savedSnapshotMap = useMemo(
-    () => snapshotMap(activity?.usulanPeserta),
-    [activity?.usulanPeserta]
+    () => snapshotMap(sourceSnapshot),
+    [sourceSnapshot]
   );
 
   const selectedParticipantRows = useMemo(
@@ -189,9 +353,13 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
           return {
             id,
             namaLengkap:
-              member?.namaLengkap || snapshot?.namaLengkap || "Anggota OSIS",
+              member?.namaLengkap ||
+              member?.fullName ||
+              snapshot?.namaLengkap ||
+              "Anggota OSIS",
             jabatanOrganisasi:
               member?.jabatanOrganisasi ||
+              member?.organisationPosition ||
               snapshot?.jabatanOrganisasi ||
               "Anggota",
             labelDivisi:
@@ -206,45 +374,18 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
     [selectedParticipantIds, memberMap, divisionMap, savedSnapshotMap]
   );
 
-  const isMeeting = activity?.jenisKegiatan === JENIS_KEGIATAN.RAPAT;
-  const isProgramKerja = !isMeeting;
-  const proposalApproved =
-    !isProgramKerja ||
-    (proposal?.status || activity?.statusProposal) === STATUS_PROPOSAL.DISETUJUI;
   const canFinalize =
-    !finalized && proposalApproved && selectedParticipantIds.size > 0;
+    !finalized &&
+    proposalAvailable &&
+    selectedParticipantIds.size > 0 &&
+    Boolean(scheduleDraft.tanggalMulaiPertama) &&
+    scheduleDraft.templateSesi.every(
+      (item) => item.jamMulai && item.jamSelesai && hitungDurasiMenit(item.jamMulai, item.jamSelesai) > 0
+    );
 
   const handleClose = () => {
     setVisible(false);
     window.setTimeout(() => onClose?.(), 220);
-  };
-
-  const reviewProposal = async (nextStatus) => {
-    if (!proposal?.id || reviewing || finalized) return;
-    setReviewing(true);
-    setError("");
-    setMessage("");
-
-    try {
-      const waktu = serverTimestamp();
-      await updateDoc("Proposal", proposal.id, {
-        status: nextStatus,
-        diperbaruiPada: waktu,
-      });
-      await updateDoc("Kegiatan", activity.id, {
-        idProposal: proposal.id,
-        statusProposal: nextStatus,
-        diperbaruiPada: waktu,
-      });
-
-      setProposal((current) => ({ ...current, status: nextStatus }));
-      setMessage(`Status proposal diubah menjadi ${labelStatusProposal(nextStatus)}.`);
-    } catch (reviewError) {
-      console.error("REVIEW PROPOSAL ERROR:", reviewError);
-      setError(reviewError?.message || "Status proposal belum berhasil diperbarui.");
-    } finally {
-      setReviewing(false);
-    }
   };
 
   const applyParticipantGroup = (rows, source) => {
@@ -272,6 +413,55 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
     });
   };
 
+  const handleScheduleSessionChange = (index, field, value) => {
+    setScheduleDraft((current) => ({
+      ...current,
+      templateSesi: current.templateSesi.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, [field]: value } : item
+      ),
+    }));
+  };
+
+  const handleRejectProposal = async () => {
+    if (!proposal?.id || finalized || rejecting) return;
+    setRejecting(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const waktu = serverTimestamp();
+
+      // Dokumen Proposal tidak dihapus agar histori penolakan tetap tersedia.
+      await updateDoc("Proposal", proposal.id, {
+        status: STATUS_PROPOSAL.DITOLAK,
+        ditolakPada: waktu,
+        diperbaruiPada: waktu,
+      });
+
+      // Relasi pada Kegiatan dilepas sehingga UI Anggota kembali ke state
+      // "Belum ada Proposal" dan Ketua Sekbid/BPH dapat mengunggah proposal baru.
+      await updateDoc("Kegiatan", activity.id, {
+        idProposal: null,
+        statusProposal: STATUS_PROPOSAL.BELUM_DIAJUKAN,
+        usulanPeserta: null,
+        snapshotJadwalProposal: null,
+        statusTim: STATUS_TIM.BELUM_DIAJUKAN,
+        diperbaruiPada: waktu,
+      });
+
+      setProposal(null);
+      setSelectedParticipantIds(new Set());
+      setParticipantSource(null);
+      participantsInitialized.current = false;
+      setMessage("Proposal ditolak. Kegiatan kembali menunggu proposal baru.");
+    } catch (rejectError) {
+      console.error("TOLAK PROPOSAL ERROR:", rejectError);
+      setError(rejectError?.message || "Proposal belum berhasil ditolak.");
+    } finally {
+      setRejecting(false);
+    }
+  };
+
   const handleFinalize = async () => {
     if (!canFinalize || finalizing) return;
     setFinalizing(true);
@@ -279,9 +469,18 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
     setMessage("");
 
     try {
+      const finalSchedule = buildFinalSchedule(activity, scheduleDraft);
+      const activityForFinalization = {
+        ...activity,
+        jadwalFinal: finalSchedule,
+        pengulanganFinal:
+          activity?.pengulanganFinal || activity?.pengulanganRencana || null,
+        sumberFinalisasiJadwal: SUMBER_FINALISASI_JADWAL.MANUAL,
+      };
+
       const result = await finalisasiKegiatan({
         db,
-        activity,
+        activity: activityForFinalization,
         proposal,
         participantIds: Array.from(selectedParticipantIds),
         serverTimestamp,
@@ -289,14 +488,20 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
       });
 
       setFinalized(true);
+      if (proposal) {
+        setProposal((current) => ({
+          ...current,
+          status: STATUS_PROPOSAL.DISETUJUI,
+        }));
+      }
       setMessage(
-        `Kegiatan disetujui. ${result.jumlahPelaksanaan} pelaksanaan dan ${result.jumlahSesiAbsensi} sesi absensi berhasil dibuat.`
+        `Kegiatan disetujui dan difinalisasi. ${result.jumlahPelaksanaan} pelaksanaan dan ${result.jumlahSesiAbsensi} sesi absensi berhasil dibuat.`
       );
     } catch (finalizeError) {
       console.error("FINALISASI KEGIATAN ERROR:", finalizeError);
       setError(
         finalizeError?.message ||
-          "Kegiatan belum berhasil difinalisasi. Periksa data jadwal dan izin Firestore."
+          "Kegiatan belum berhasil difinalisasi. Periksa peserta dan jadwal."
       );
     } finally {
       setFinalizing(false);
@@ -306,25 +511,28 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
   return (
     <>
       <section
-        className={`flex max-h-[calc(100dvh-2rem)] w-[min(96vw,980px)] flex-col overflow-hidden rounded-[28px] border border-border bg-card shadow-2xl transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+        className={`flex max-h-[calc(100dvh-2rem)] w-[min(96vw,980px)] flex-col overflow-hidden rounded-[28px] border border-border bg-card shadow-2xl transition-all duration-300 ${
           visible
             ? "translate-y-0 scale-100 opacity-100"
             : "translate-y-5 scale-[0.975] opacity-0"
         }`}
       >
         <header className="relative shrink-0 overflow-hidden border-b border-border bg-gradient-to-br from-primary/10 via-card to-card px-5 py-5 sm:px-7 sm:py-6">
-          <div className="absolute -right-14 -top-16 h-44 w-44 rounded-full bg-primary/10 blur-3xl" />
           <div className="relative flex items-start justify-between gap-5">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <TypeBadge type={activity?.jenisKegiatan} />
-                <ActivityStatusBadge status={finalized ? STATUS_KEGIATAN.AKAN_DATANG : activity?.status} />
+                <ActivityStatusBadge
+                  status={
+                    finalized ? STATUS_KEGIATAN.AKAN_DATANG : activity?.status
+                  }
+                />
               </div>
               <h2 className="mt-3 text-xl font-bold tracking-tight text-text sm:text-2xl">
                 {activity?.namaKegiatan || "Kegiatan tanpa nama"}
               </h2>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-text-muted">
-                Tinjau informasi, proposal, peserta, dan jadwal sebelum kegiatan disetujui.
+                Tinjau informasi kegiatan sebelum melakukan finalisasi.
               </p>
             </div>
 
@@ -332,6 +540,7 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
               type="button"
               onClick={handleClose}
               className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-border bg-card text-text-muted transition hover:bg-surface hover:text-text"
+              aria-label="Tutup detail kegiatan"
             >
               <AppIcon name="close" size={22} />
             </button>
@@ -350,8 +559,16 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
             </section>
 
             <div className="space-y-3">
-              <QuickInfo icon="location_on" label="Lokasi" value={activity?.lokasi || "Belum ditentukan"} />
-              <QuickInfo icon="apartment" label="Penyelenggara" value={labelDivisi(activity?.divisi)} />
+              <QuickInfo
+                icon="location_on"
+                label="Lokasi"
+                value={activity?.lokasi || "Belum ditentukan"}
+              />
+              <QuickInfo
+                icon="apartment"
+                label="Penyelenggara"
+                value={labelDivisi(activity?.divisi)}
+              />
             </div>
           </div>
 
@@ -361,17 +578,31 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
                 <AppIcon name="calendar_month" size={20} />
               </span>
               <div>
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-primary">Jadwal</p>
+                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-primary">
+                  Jadwal
+                </p>
                 <h3 className="font-bold text-text">Informasi Jadwal</h3>
               </div>
             </div>
             <div className="grid grid-cols-1 divide-y divide-border sm:grid-cols-3 sm:divide-x sm:divide-y-0">
-              <ScheduleInfo icon="schedule" label="Waktu Pelaksanaan" value={formatDateRange(activity)} />
-              <ScheduleInfo icon="timer" label="Durasi" value={formatDuration(activity)} />
+              <ScheduleInfo
+                icon="calendar_month"
+                label="Waktu Pelaksanaan"
+                value={formatDateRange(activity)}
+              />
+              <ScheduleInfo
+                icon="calendar_month"
+                label="Durasi"
+                value={formatDuration(activity)}
+              />
               <ScheduleInfo
                 icon="fact_check"
                 label="Sesi Absensi"
-                value={`${activity?.jumlahSesiAbsensi || activity?.jumlahSesiAbsensiRencana || 0} sesi`}
+                value={`${
+                  activity?.jumlahSesiAbsensi ||
+                  activity?.jumlahSesiAbsensiRencana ||
+                  0
+                } sesi`}
               />
             </div>
           </section>
@@ -384,23 +615,31 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
                     <AppIcon name="picture_as_pdf" size={22} />
                   </span>
                   <div>
-                    <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-primary">Review Dokumen</p>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-primary">
+                      Dokumen Kegiatan
+                    </p>
                     <h3 className="font-bold text-text">Proposal Program Kerja</h3>
                   </div>
                 </div>
-                {proposal && <ProposalStatusBadge status={proposal.status || activity?.statusProposal} />}
+                {proposal && (
+                  <ProposalStatusBadge
+                    status={proposal.status || activity?.statusProposal}
+                  />
+                )}
               </div>
 
               {proposal ? (
                 <div className="mt-5 rounded-2xl border border-border bg-surface p-4">
                   <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-bold text-text">{proposal.namaFile || "File proposal"}</p>
+                      <p className="truncate text-sm font-bold text-text">
+                        {proposal.namaFile || "File proposal"}
+                      </p>
                       <p className="mt-1 text-xs text-text-muted">
                         Versi {proposal.versi || 1} · {formatBytes(proposal.ukuranFileByte)}
                       </p>
                     </div>
-                    {proposal.urlFile ? (
+                    {proposal.urlFile && (
                       <a
                         href={proposal.urlFile}
                         target="_blank"
@@ -410,141 +649,229 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
                         <AppIcon name="open_in_new" size={17} />
                         Buka Proposal
                       </a>
-                    ) : (
-                      <span className="text-xs font-semibold text-text-muted">File fisik belum terhubung ke storage</span>
                     )}
                   </div>
                 </div>
               ) : (
                 <div className="mt-5 rounded-2xl border border-dashed border-red-200 bg-red-50 p-4">
                   <p className="text-sm font-bold text-red-700">Belum ada proposal</p>
-                  <p className="mt-1 text-xs text-red-600">Kegiatan belum dapat difinalisasi sebelum proposal diajukan.</p>
-                </div>
-              )}
-
-              {proposal && !finalized && (
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <ReviewButton
-                    active={proposal.status === STATUS_PROPOSAL.DISETUJUI}
-                    icon="check_circle"
-                    label="Setujui Proposal"
-                    tone="green"
-                    disabled={reviewing}
-                    onClick={() => reviewProposal(STATUS_PROPOSAL.DISETUJUI)}
-                  />
-                  <ReviewButton
-                    active={proposal.status === STATUS_PROPOSAL.PERLU_REVISI}
-                    icon="edit_note"
-                    label="Perlu Revisi"
-                    tone="amber"
-                    disabled={reviewing}
-                    onClick={() => reviewProposal(STATUS_PROPOSAL.PERLU_REVISI)}
-                  />
-                  <ReviewButton
-                    active={proposal.status === STATUS_PROPOSAL.DITOLAK}
-                    icon="cancel"
-                    label="Tolak"
-                    tone="red"
-                    disabled={reviewing}
-                    onClick={() => reviewProposal(STATUS_PROPOSAL.DITOLAK)}
-                  />
+                  <p className="mt-1 text-xs text-red-600">
+                    Peserta dan Finalisasi Jadwal baru tersedia setelah Proposal masuk.
+                  </p>
                 </div>
               )}
             </section>
           )}
 
-          <section className="mt-6 rounded-3xl border border-border bg-card p-5 shadow-sm sm:p-6">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-              <div className="flex items-start gap-3">
-                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-blue-50 text-blue-700">
-                  <AppIcon name="groups" size={22} />
-                </span>
-                <div>
-                  <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-blue-700">Peserta</p>
-                  <h3 className="font-bold text-text">Peserta Kegiatan</h3>
-                  <p className="mt-1 max-w-xl text-xs leading-5 text-text-muted">
-                    {activity?.usulanPeserta
-                      ? "Usulan anggota sudah dimuat. Pembina dapat mengurangi, menambah, atau mengganti peserta sebelum finalisasi."
-                      : "Tidak ada usulan peserta. Tentukan peserta sebelum menyetujui kegiatan."}
-                  </p>
-                </div>
-              </div>
+          {showFinalizationSections && (
+            <>
+              <section className="mt-6 rounded-3xl border border-border bg-card p-5 shadow-sm sm:p-6">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="flex items-start gap-3">
+                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-blue-50 text-blue-700">
+                      <AppIcon name="groups" size={22} />
+                    </span>
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-blue-700">
+                        Peserta
+                      </p>
+                      <h3 className="font-bold text-text">Peserta Kegiatan</h3>
+                      <p className="mt-1 max-w-xl text-xs leading-5 text-text-muted">
+                        {activity?.usulanPeserta?.idAnggota?.length
+                          ? "Usulan peserta dari pengunggah sudah dimuat. Pembina tetap dapat menyesuaikan daftar."
+                          : isProgramKerja
+                            ? "Pengunggah tidak mengajukan peserta. Secara default seluruh anggota aktif Sekbid penyelenggara dimuat."
+                            : "Tinjau dan sesuaikan peserta rapat sebelum finalisasi."}
+                      </p>
+                    </div>
+                  </div>
 
-              {!finalized && (
-                <button
-                  type="button"
-                  onClick={() => setParticipantPickerMode("kelompok")}
-                  className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 text-sm font-bold text-blue-700 transition hover:bg-blue-100"
-                >
-                  <AppIcon name="group_add" size={18} />
-                  {selectedParticipantIds.size ? "Ganti Kelompok" : "Pilih Peserta"}
-                </button>
-              )}
-            </div>
-
-            {(participantSource || activity?.usulanPeserta) && (
-              <div className="mt-5 flex flex-wrap items-center gap-2">
-                <span className="rounded-full bg-blue-50 px-3 py-1 text-[10px] font-bold text-blue-700">
-                  {activity?.usulanPeserta && !activity?.pesertaFinal ? "Usulan Anggota" : participantSource?.label || "Peserta Final"}
-                </span>
-                <span className="text-xs font-semibold text-text-muted">
-                  {selectedParticipantIds.size} peserta dipilih
-                </span>
-              </div>
-            )}
-
-            {selectedParticipantRows.length ? (
-              <div className="mt-4 overflow-hidden rounded-2xl border border-border">
-                <div className="max-h-72 divide-y divide-border overflow-y-auto">
-                  {selectedParticipantRows.map((participant) => (
-                    <label
-                      key={participant.id}
-                      className="flex items-center gap-3 bg-card px-4 py-3"
-                    >
-                      {!finalized && (
-                        <input
-                          type="checkbox"
-                          checked={selectedParticipantIds.has(participant.id)}
-                          onChange={() => toggleParticipant(participant.id)}
-                          className="h-4 w-4 rounded border-border accent-primary"
-                        />
-                      )}
-                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-xs font-bold text-primary">
-                        {initials(participant.namaLengkap)}
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-sm font-bold text-text">{participant.namaLengkap}</span>
-                        <span className="mt-0.5 block truncate text-xs text-text-muted">
-                          {participant.jabatanOrganisasi} · {participant.labelDivisi}
-                        </span>
-                      </span>
-                    </label>
-                  ))}
-                </div>
-
-                {!finalized && (
-                  <div className="border-t border-border bg-surface p-3">
+                  {!finalized && (
                     <button
                       type="button"
-                      onClick={() => setParticipantPickerMode("manual")}
-                      className="inline-flex min-h-9 items-center justify-center gap-2 rounded-xl border border-dashed border-primary/40 bg-card px-3 text-xs font-bold text-primary hover:bg-primary/5"
+                      onClick={() => setParticipantPickerMode("kelompok")}
+                      className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 text-sm font-bold text-blue-700 transition hover:bg-blue-100"
                     >
-                      <AppIcon name="person_add" size={17} />
-                      Tambah Peserta
+                      <AppIcon name="group_add" size={18} />
+                      {selectedParticipantIds.size ? "Ganti Kelompok" : "Pilih Peserta"}
                     </button>
+                  )}
+                </div>
+
+                {participantSource && (
+                  <div className="mt-5 flex flex-wrap items-center gap-2">
+                    <span className="rounded-full bg-blue-50 px-3 py-1 text-[10px] font-bold text-blue-700">
+                      {participantSource.label}
+                    </span>
+                    <span className="text-xs font-semibold text-text-muted">
+                      {selectedParticipantIds.size} peserta dipilih
+                    </span>
                   </div>
                 )}
-              </div>
-            ) : (
-              <div className="mt-4 rounded-2xl border border-dashed border-border bg-surface p-5 text-center">
-                <p className="text-sm font-bold text-text">Peserta belum ditentukan</p>
-                <p className="mt-1 text-xs text-text-muted">Pilih minimal satu peserta agar sesi absensi memiliki daftar sasaran.</p>
-              </div>
-            )}
-          </section>
+
+                {selectedParticipantRows.length ? (
+                  <div className="mt-4 overflow-hidden rounded-2xl border border-border">
+                    <div className="max-h-72 divide-y divide-border overflow-y-auto">
+                      {selectedParticipantRows.map((participant) => (
+                        <label
+                          key={participant.id}
+                          className="flex items-center gap-3 bg-card px-4 py-3"
+                        >
+                          {!finalized && (
+                            <input
+                              type="checkbox"
+                              checked={selectedParticipantIds.has(participant.id)}
+                              onChange={() => toggleParticipant(participant.id)}
+                              className="h-4 w-4 rounded border-border accent-primary"
+                            />
+                          )}
+                          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-xs font-bold text-primary">
+                            {initials(participant.namaLengkap)}
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm font-bold text-text">
+                              {participant.namaLengkap}
+                            </span>
+                            <span className="mt-0.5 block truncate text-xs text-text-muted">
+                              {participant.jabatanOrganisasi} · {participant.labelDivisi}
+                            </span>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+
+                    {!finalized && (
+                      <div className="border-t border-border bg-surface p-3">
+                        <button
+                          type="button"
+                          onClick={() => setParticipantPickerMode("manual")}
+                          className="inline-flex min-h-9 items-center justify-center gap-2 rounded-xl border border-dashed border-primary/40 bg-card px-3 text-xs font-bold text-primary hover:bg-primary/5"
+                        >
+                          <AppIcon name="person_add" size={17} />
+                          Tambah Peserta
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="mt-4 rounded-2xl border border-dashed border-border bg-surface p-5 text-center">
+                    <p className="text-sm font-bold text-text">Peserta belum ditentukan</p>
+                    <p className="mt-1 text-xs text-text-muted">
+                      Pilih minimal satu peserta sebelum finalisasi.
+                    </p>
+                  </div>
+                )}
+              </section>
+
+              <section className="mt-6 overflow-hidden rounded-3xl border border-border bg-card shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => setScheduleOpen((current) => !current)}
+                  className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left sm:px-6"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                      <AppIcon name="calendar_month" size={20} />
+                    </span>
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-primary">
+                        Jadwal Final
+                      </p>
+                      <h3 className="font-bold text-text">Finalisasi Jadwal</h3>
+                      <p className="mt-1 text-xs text-text-muted">
+                        Default menggunakan jadwal rencana. Buka hanya jika perlu perubahan.
+                      </p>
+                    </div>
+                  </div>
+                  <AppIcon
+                    name={scheduleOpen ? "expand_less" : "expand_more"}
+                    size={20}
+                    className="text-text-muted"
+                  />
+                </button>
+
+                {scheduleOpen && (
+                  <div className="border-t border-border bg-surface p-5 sm:p-6">
+                    <div>
+                      <label className="text-xs font-bold uppercase tracking-wider text-text-muted">
+                        Tanggal Pelaksanaan Pertama
+                      </label>
+                      <input
+                        type="date"
+                        disabled={finalized}
+                        value={scheduleDraft.tanggalMulaiPertama}
+                        onChange={(event) =>
+                          setScheduleDraft((current) => ({
+                            ...current,
+                            tanggalMulaiPertama: event.target.value,
+                          }))
+                        }
+                        className="mt-2 min-h-11 w-full rounded-xl border border-border bg-input px-4 text-sm outline-none focus:border-primary disabled:opacity-60 sm:max-w-xs"
+                      />
+                    </div>
+
+                    <div className="mt-5 space-y-3">
+                      {scheduleDraft.templateSesi.map((session, index) => (
+                        <div
+                          key={`${session.selisihHari}-${index}`}
+                          className="grid grid-cols-1 gap-3 rounded-2xl border border-border bg-card p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end"
+                        >
+                          <div>
+                            <label className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
+                              Mulai · Sesi {index + 1}
+                            </label>
+                            <input
+                              type="time"
+                              disabled={finalized}
+                              value={session.jamMulai}
+                              onChange={(event) =>
+                                handleScheduleSessionChange(
+                                  index,
+                                  "jamMulai",
+                                  event.target.value
+                                )
+                              }
+                              className="mt-2 min-h-10 w-full rounded-xl border border-border bg-input px-3 text-sm outline-none focus:border-primary disabled:opacity-60"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
+                              Selesai
+                            </label>
+                            <input
+                              type="time"
+                              disabled={finalized}
+                              value={session.jamSelesai}
+                              onChange={(event) =>
+                                handleScheduleSessionChange(
+                                  index,
+                                  "jamSelesai",
+                                  event.target.value
+                                )
+                              }
+                              className="mt-2 min-h-10 w-full rounded-xl border border-border bg-input px-3 text-sm outline-none focus:border-primary disabled:opacity-60"
+                            />
+                          </div>
+                          <span className="pb-2 text-xs font-semibold text-text-muted">
+                            Hari +{session.selisihHari}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
+            </>
+          )}
 
           {(message || error) && (
-            <div className={`mt-5 rounded-2xl px-4 py-3 text-sm font-medium ${error ? "bg-error-bg text-error-text" : "bg-emerald-50 text-emerald-800"}`}>
+            <div
+              className={`mt-5 rounded-2xl px-4 py-3 text-sm font-medium ${
+                error
+                  ? "bg-error-bg text-error-text"
+                  : "bg-emerald-50 text-emerald-800"
+              }`}
+            >
               {error || message}
             </div>
           )}
@@ -554,17 +881,19 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-xs leading-5 text-text-muted">
               {finalized ? (
-                <span className="font-bold text-emerald-700">Kegiatan sudah difinalisasi dan sesi absensi sudah dibuat.</span>
-              ) : isProgramKerja && !proposalApproved ? (
-                "Setujui proposal terlebih dahulu sebelum memfinalisasi kegiatan."
+                <span className="font-bold text-emerald-700">
+                  Kegiatan sudah difinalisasi dan sesi absensi sudah dibuat.
+                </span>
+              ) : isProgramKerja && !proposal ? (
+                "Menunggu Proposal sebelum peserta dan jadwal dapat difinalisasi."
               ) : !selectedParticipantIds.size ? (
                 "Tentukan peserta sebelum memfinalisasi kegiatan."
               ) : (
-                "Semua syarat finalisasi sudah terpenuhi."
+                "Peserta dan jadwal siap difinalisasi."
               )}
             </div>
 
-            <div className="flex gap-2 sm:justify-end">
+            <div className="flex flex-wrap gap-2 sm:justify-end">
               <button
                 type="button"
                 onClick={handleClose}
@@ -572,15 +901,32 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
               >
                 Tutup
               </button>
-              {!finalized && (
+
+              {isProgramKerja && proposal && !finalized && (
                 <button
                   type="button"
-                  disabled={!canFinalize || finalizing}
+                  disabled={rejecting || finalizing}
+                  onClick={handleRejectProposal}
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 text-sm font-bold text-red-700 transition hover:bg-red-100 disabled:opacity-50"
+                >
+                  <AppIcon name="close" size={18} />
+                  {rejecting ? "Menolak..." : "Tolak Proposal"}
+                </button>
+              )}
+
+              {showFinalizationSections && !finalized && (
+                <button
+                  type="button"
+                  disabled={!canFinalize || finalizing || rejecting}
                   onClick={handleFinalize}
                   className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-bold text-white transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <AppIcon name="check" size={18} />
-                  {finalizing ? "Memfinalisasi..." : isMeeting ? "Setujui Rapat" : "Setujui Kegiatan"}
+                  {finalizing
+                    ? "Memfinalisasi..."
+                    : isMeeting
+                      ? "Setujui & Finalisasi Rapat"
+                      : "Setujui & Finalisasi Kegiatan"}
                 </button>
               )}
             </div>
@@ -588,7 +934,7 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
         </footer>
       </section>
 
-      {participantPickerMode && !finalized && (
+      {participantPickerMode && showFinalizationSections && !finalized && (
         <PilihPesertaKegiatanOverlay
           mode={participantPickerMode}
           member={activity?.penanggungJawab || { idDivisi: activity?.idDivisi }}
@@ -606,7 +952,11 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
 function TypeBadge({ type }) {
   const meeting = type === JENIS_KEGIATAN.RAPAT;
   return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider ${meeting ? "bg-blue-50 text-blue-700" : "bg-primary/10 text-primary"}`}>
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider ${
+        meeting ? "bg-blue-50 text-blue-700" : "bg-primary/10 text-primary"
+      }`}
+    >
       <AppIcon name={meeting ? "groups" : "campaign"} size={14} />
       {labelJenis(type)}
     </span>
@@ -622,7 +972,12 @@ function ActivityStatusBadge({ status }) {
     selesai: ["Selesai", "bg-emerald-50 text-emerald-700"],
     dibatalkan: ["Dibatalkan", "bg-red-50 text-red-700"],
   }[status] || [status || "-", "bg-slate-100 text-slate-700"];
-  return <span className={`rounded-full px-3 py-1.5 text-[10px] font-bold ${config[1]}`}>{config[0]}</span>;
+
+  return (
+    <span className={`rounded-full px-3 py-1.5 text-[10px] font-bold ${config[1]}`}>
+      {config[0]}
+    </span>
+  );
 }
 
 function ProposalStatusBadge({ status }) {
@@ -632,20 +987,11 @@ function ProposalStatusBadge({ status }) {
     disetujui: "bg-emerald-50 text-emerald-700",
     ditolak: "bg-red-50 text-red-700",
   }[status] || "bg-slate-100 text-slate-700";
-  return <span className={`rounded-full px-3 py-1.5 text-[10px] font-bold ${cls}`}>{labelStatusProposal(status)}</span>;
-}
 
-function ReviewButton({ active, icon, label, tone, disabled, onClick }) {
-  const toneClass = {
-    green: active ? "border-emerald-300 bg-emerald-100 text-emerald-800" : "border-emerald-200 bg-emerald-50 text-emerald-700",
-    amber: active ? "border-orange-300 bg-orange-100 text-orange-800" : "border-orange-200 bg-orange-50 text-orange-700",
-    red: active ? "border-red-300 bg-red-100 text-red-800" : "border-red-200 bg-red-50 text-red-700",
-  }[tone];
   return (
-    <button type="button" disabled={disabled} onClick={onClick} className={`inline-flex min-h-10 items-center gap-2 rounded-xl border px-3 text-xs font-bold transition disabled:opacity-50 ${toneClass}`}>
-      <AppIcon name={icon} size={17} />
-      {label}
-    </button>
+    <span className={`rounded-full px-3 py-1.5 text-[10px] font-bold ${cls}`}>
+      {labelStatusProposal(status)}
+    </span>
   );
 }
 
@@ -653,8 +999,17 @@ function QuickInfo({ icon, label, value }) {
   return (
     <div className="rounded-2xl border border-border bg-card p-4 shadow-sm">
       <div className="flex items-start gap-3">
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary"><AppIcon name={icon} size={18} /></span>
-        <div><p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">{label}</p><p className="mt-1 text-sm font-semibold leading-6 text-text">{value || "-"}</p></div>
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+          <AppIcon name={icon} size={18} />
+        </span>
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
+            {label}
+          </p>
+          <p className="mt-1 text-sm font-semibold leading-6 text-text">
+            {value || "-"}
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -662,10 +1017,28 @@ function QuickInfo({ icon, label, value }) {
 
 function ScheduleInfo({ icon, label, value }) {
   return (
-    <div className="p-5"><div className="flex items-start gap-3"><AppIcon name={icon} size={19} className="mt-0.5 shrink-0 text-primary" /><div><p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">{label}</p><p className="mt-1.5 text-sm font-semibold leading-6 text-text">{value || "-"}</p></div></div></div>
+    <div className="p-5">
+      <div className="flex items-start gap-3">
+        <AppIcon name={icon} size={19} className="mt-0.5 shrink-0 text-primary" />
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
+            {label}
+          </p>
+          <p className="mt-1.5 text-sm font-semibold leading-6 text-text">
+            {value || "-"}
+          </p>
+        </div>
+      </div>
+    </div>
   );
 }
 
 function initials(value) {
-  return String(value || "A").trim().split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("");
+  return String(value || "A")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
 }
