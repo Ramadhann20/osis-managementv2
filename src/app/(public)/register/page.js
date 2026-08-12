@@ -233,6 +233,7 @@ export default function RegisterPage() {
             <AppIcon name="person_add" size={20} />
             {authLoading ? "Mendaftarkan..." : "Daftar"}
           </button>
+
         </form>
 
         <div className="mt-8 border-t border-border pt-6 text-center text-sm text-text-muted">
@@ -245,6 +246,8 @@ export default function RegisterPage() {
           </Link>
         </div>
       </section>
+
+      
     </main>
   );
 }
