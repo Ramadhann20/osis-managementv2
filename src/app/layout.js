@@ -11,7 +11,7 @@ import { OverlayProvider } from "@/context/ui/OverlayContext";
 
 
 export const metadata = {
-  title: "Osis",
+  title: "SIM Osis | SMA Mutiara 2",
   description: "Osis Management",
 };
 

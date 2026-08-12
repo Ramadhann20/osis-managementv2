@@ -233,7 +233,7 @@ export default function DashboardPembina() {
             </DisabledAction>
 
             <Link
-              href="/pembina/pendaftaran"
+              href="/pembina/data-anggota"
               className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-white"
             >
               <AppIcon name="person_add" size={18} />

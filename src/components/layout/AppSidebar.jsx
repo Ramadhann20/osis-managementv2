@@ -45,8 +45,12 @@ export default function AppSidebar({
             onClick={onClose}
             className="flex items-center gap-3"
           >
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary text-white">
-              <AppIcon name="school" size={22} />
+            <div className="h-10 w-10 overflow-hidden rounded-xl border border-border bg-white shadow-sm">
+              <img
+                src="/images/logo-osis-mutiara.jpeg"
+                alt="Logo OSIS SMA Mutiara"
+                className="h-full w-full object-contain"
+              />
             </div>
 
             <div>

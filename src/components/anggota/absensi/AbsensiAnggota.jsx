@@ -9,10 +9,9 @@ import { useCurrentMember } from "@/components/anggota/_shared/useCurrentMember"
 import {
   formatShortDate,
   formatTime,
-  sortByDateDescending,
+  toDate,
 } from "@/components/anggota/_shared/formatters";
 import {
-  AttendanceBadge,
   DisabledAction,
   EmptyState,
   PageError,
@@ -21,9 +20,90 @@ import {
   StatCard,
 } from "@/components/anggota/_shared/Ui";
 
+const STATUS_KEHADIRAN = Object.freeze({
+  HADIR: "hadir",
+  TERLAMBAT: "terlambat",
+  IZIN: "izin",
+  SAKIT: "sakit",
+  ALPA: "alpa",
+});
+
+function rowsOf(result) {
+  return Array.isArray(result?.rows) ? result.rows : [];
+}
+
+function normalisasiStatusKehadiran(value) {
+  const status = String(value || "").trim().toLowerCase();
+
+  const mapping = {
+    hadir: STATUS_KEHADIRAN.HADIR,
+    present: STATUS_KEHADIRAN.HADIR,
+    terlambat: STATUS_KEHADIRAN.TERLAMBAT,
+    late: STATUS_KEHADIRAN.TERLAMBAT,
+    izin: STATUS_KEHADIRAN.IZIN,
+    excused: STATUS_KEHADIRAN.IZIN,
+    sakit: STATUS_KEHADIRAN.SAKIT,
+    sick: STATUS_KEHADIRAN.SAKIT,
+    alpa: STATUS_KEHADIRAN.ALPA,
+    absent: STATUS_KEHADIRAN.ALPA,
+  };
+
+  return mapping[status] || status || "-";
+}
+
+function statusRecord(record) {
+  return normalisasiStatusKehadiran(
+    record?.statusKehadiran ?? record?.status
+  );
+}
+
+function waktuCheckIn(record) {
+  return (
+    record?.waktuCheckIn ??
+    record?.checkInPada ??
+    record?.checkInAt ??
+    null
+  );
+}
+
+function waktuCheckOut(record) {
+  return (
+    record?.waktuCheckOut ??
+    record?.checkOutPada ??
+    record?.checkOutAt ??
+    null
+  );
+}
+
+function catatanRecord(record) {
+  return record?.catatan ?? record?.note ?? "-";
+}
+
+function waktuRecord(record) {
+  return (
+    waktuCheckIn(record) ??
+    record?.dibuatPada ??
+    record?.createdAt ??
+    null
+  );
+}
+
+function sortAbsensiTerbaru(records) {
+  return [...records].sort((a, b) => {
+    const waktuA = toDate(waktuRecord(a))?.getTime() || 0;
+    const waktuB = toDate(waktuRecord(b))?.getTime() || 0;
+    return waktuB - waktuA;
+  });
+}
+
 export default function AbsensiAnggota() {
-  const { member, memberId, loading: memberLoading, error: memberError } =
-    useCurrentMember();
+  const {
+    member,
+    memberId,
+    loading: memberLoading,
+    error: memberError,
+  } = useCurrentMember();
+
   const { colRef, query, where, limit } = useDb();
 
   const [search, setSearch] = useState("");
@@ -31,128 +111,137 @@ export default function AbsensiAnggota() {
 
   const attendance = useCollection(
     () =>
-      query(
-        colRef("Absensi"),
-        where("memberId", "==", memberId)
-      ),
+      memberId
+        ? query(colRef("Absensi"), where("idAnggota", "==", memberId))
+        : null,
     [memberId],
     { enabled: Boolean(memberId) }
   );
 
   const summaries = useCollection(
     () =>
-      query(
-        colRef("RingkasanAbsensi"),
-        where("memberId", "==", memberId),
-        limit(1)
-      ),
+      memberId
+        ? query(
+            colRef("RingkasanAbsensi"),
+            where("idAnggota", "==", memberId),
+            limit(1)
+          )
+        : null,
     [memberId],
     { enabled: Boolean(memberId) }
   );
 
-  const activities = useCollection(
-    () => colRef("Kegiatan"),
-    [],
-    { enabled: true }
-  );
+  const activities = useCollection(() => colRef("Kegiatan"), [], {
+    enabled: true,
+  });
+
+  const sessions = useCollection(() => colRef("SesiAbsensi"), [], {
+    enabled: true,
+  });
 
   const loading =
     memberLoading ||
     attendance.loading ||
     summaries.loading ||
-    activities.loading;
+    activities.loading ||
+    sessions.loading;
 
   const error =
     memberError ||
     attendance.error ||
     summaries.error ||
-    activities.error;
+    activities.error ||
+    sessions.error;
 
   const rows = useMemo(() => {
     const activityMap = new Map(
-      (activities.data || []).map((item) => [item.id, item])
+      rowsOf(activities).map((item) => [item.id, item])
     );
 
-    return sortByDateDescending(
-      attendance.data || [],
-      "createdAt"
-    )
-      .map((record) => ({
-        ...record,
-        activity: activityMap.get(record.activityId) || null,
-      }))
+    const sessionMap = new Map(
+      rowsOf(sessions).map((item) => [item.id, item])
+    );
+
+    const keyword = search.trim().toLowerCase();
+
+    return sortAbsensiTerbaru(rowsOf(attendance))
+      .map((record) => {
+        const idSesi = record.idSesi ?? record.sessionId ?? null;
+        const session = idSesi ? sessionMap.get(idSesi) || null : null;
+
+        const idKegiatan =
+          record.idKegiatan ??
+          record.activityId ??
+          session?.idKegiatan ??
+          null;
+
+        return {
+          ...record,
+          session,
+          activity: idKegiatan ? activityMap.get(idKegiatan) || null : null,
+          statusTampil: statusRecord(record),
+        };
+      })
       .filter((record) => {
-        const keyword = search.trim().toLowerCase();
+        const namaKegiatan = String(
+          record.activity?.namaKegiatan || ""
+        ).toLowerCase();
+        const lokasi = String(record.activity?.lokasi || "").toLowerCase();
+
         const matchesSearch =
           !keyword ||
-          record.activity?.title
-            ?.toLowerCase()
-            .includes(keyword) ||
-          record.activity?.location
-            ?.toLowerCase()
-            .includes(keyword);
+          namaKegiatan.includes(keyword) ||
+          lokasi.includes(keyword);
 
         const matchesStatus =
-          statusFilter === "all" ||
-          record.status === statusFilter;
+          statusFilter === "all" || record.statusTampil === statusFilter;
 
         return matchesSearch && matchesStatus;
       });
-  }, [
-    activities.data,
-    attendance.data,
-    search,
-    statusFilter,
-  ]);
+  }, [activities, sessions, attendance, search, statusFilter]);
 
   const summary = useMemo(() => {
-    const stored = summaries.data?.[0];
+    const stored = rowsOf(summaries)[0] || null;
+    const records = rowsOf(attendance);
 
-    if (stored) return stored;
+    const hitung = (status) =>
+      records.filter((item) => statusRecord(item) === status).length;
 
-    const records = attendance.data || [];
+    const hadir = hitung(STATUS_KEHADIRAN.HADIR);
+    const terlambat = hitung(STATUS_KEHADIRAN.TERLAMBAT);
+    const izin = hitung(STATUS_KEHADIRAN.IZIN);
+    const sakit = hitung(STATUS_KEHADIRAN.SAKIT);
+    const alpa = hitung(STATUS_KEHADIRAN.ALPA);
+
+    const persentaseHitung = records.length
+      ? Math.round(((hadir + terlambat) / records.length) * 100)
+      : 0;
 
     return {
-      totalActivities: records.length,
-      presentCount: records.filter(
-        (item) => item.status === "present"
-      ).length,
-      lateCount: records.filter(
-        (item) => item.status === "late"
-      ).length,
-      excusedCount: records.filter(
-        (item) =>
-          item.status === "excused" ||
-          item.status === "sick"
-      ).length,
-      absentCount: records.filter(
-        (item) => item.status === "absent"
-      ).length,
-      attendancePercentage: records.length
-        ? Math.round(
-            (records.filter((item) =>
-              ["present", "late"].includes(item.status)
-            ).length /
-              records.length) *
-              100
-          )
-        : 0,
+      jumlahKegiatan: stored?.jumlahKegiatan ?? records.length,
+      persentaseKehadiran:
+        stored?.persentaseKehadiran ?? persentaseHitung,
+      hadir,
+      terlambat,
+      izin,
+      sakit,
+      alpa,
     };
-  }, [attendance.data, summaries.data]);
+  }, [attendance, summaries]);
 
   if (loading) {
     return <PageLoading message="Memuat histori kehadiran..." />;
   }
 
   if (error) {
-    return <PageError />;
+    return <PageError message={error.message} />;
   }
 
   if (!member) {
     return (
       <PageError
         title="Profil anggota tidak ditemukan"
-        message="Histori absensi hanya dapat ditampilkan jika akun terhubung ke dokumen Anggota."
+        message="Histori absensi hanya dapat ditampilkan jika akun terhubung ke dokumen Anggota melalui idPengguna."
       />
     );
   }
@@ -162,15 +251,13 @@ export default function AbsensiAnggota() {
       <PageHeading
         eyebrow="Kehadiran Anggota"
         title="Histori Kehadiran"
-        description={`Rekap kehadiran ${member.fullName} pada kegiatan OSIS.`}
+        description={`Rekap kehadiran ${member.namaLengkap || "Anggota"} pada kegiatan OSIS.`}
         action={
           <div className="flex flex-wrap gap-3">
             <DisabledAction icon="download" variant="neutral">
               Export PDF
             </DisabledAction>
-            <DisabledAction icon="download">
-              Export Excel
-            </DisabledAction>
+            <DisabledAction icon="download">Export Excel</DisabledAction>
           </div>
         }
       />
@@ -179,31 +266,27 @@ export default function AbsensiAnggota() {
         <StatCard
           icon="event_available"
           label="Total Presensi"
-          value={summary.totalActivities || 0}
-          helper={`${summary.attendancePercentage || 0}% tingkat kehadiran`}
+          value={summary.jumlahKegiatan || 0}
+          helper={`${summary.persentaseKehadiran || 0}% tingkat kehadiran`}
         />
         <StatCard
           icon="check"
           label="Hadir"
-          value={summary.presentCount || 0}
+          value={summary.hadir}
           helper="Hadir tepat waktu."
           accent="green"
         />
         <StatCard
           icon="calendar_month"
           label="Terlambat"
-          value={summary.lateCount || 0}
+          value={summary.terlambat}
           helper="Kehadiran setelah waktu mulai."
           accent="amber"
         />
         <StatCard
           icon="close"
           label="Izin, Sakit, atau Alpa"
-          value={
-            (summary.excusedCount || 0) +
-            (summary.sickCount || 0) +
-            (summary.absentCount || 0)
-          }
+          value={summary.izin + summary.sakit + summary.alpa}
           helper="Kehadiran tidak penuh."
           accent="red"
         />
@@ -212,9 +295,7 @@ export default function AbsensiAnggota() {
       <section className="mt-7 overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
         <div className="flex flex-col gap-4 border-b border-border p-5 md:flex-row md:items-center md:justify-between">
           <div>
-            <h2 className="font-bold text-text">
-              Daftar Kehadiran
-            </h2>
+            <h2 className="font-bold text-text">Daftar Kehadiran</h2>
             <p className="mt-1 text-xs text-text-muted">
               {rows.length} data ditampilkan.
             </p>
@@ -238,17 +319,15 @@ export default function AbsensiAnggota() {
 
             <select
               value={statusFilter}
-              onChange={(event) =>
-                setStatusFilter(event.target.value)
-              }
+              onChange={(event) => setStatusFilter(event.target.value)}
               className="min-h-11 rounded-xl border border-border bg-input px-4 text-sm text-text outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
             >
               <option value="all">Semua Status</option>
-              <option value="present">Hadir</option>
-              <option value="late">Terlambat</option>
-              <option value="excused">Izin</option>
-              <option value="sick">Sakit</option>
-              <option value="absent">Alpa</option>
+              <option value={STATUS_KEHADIRAN.HADIR}>Hadir</option>
+              <option value={STATUS_KEHADIRAN.TERLAMBAT}>Terlambat</option>
+              <option value={STATUS_KEHADIRAN.IZIN}>Izin</option>
+              <option value={STATUS_KEHADIRAN.SAKIT}>Sakit</option>
+              <option value={STATUS_KEHADIRAN.ALPA}>Alpa</option>
             </select>
           </div>
         </div>
@@ -266,21 +345,11 @@ export default function AbsensiAnggota() {
             <table className="w-full min-w-[850px] text-left">
               <thead className="bg-input text-xs uppercase tracking-wider text-text-muted">
                 <tr>
-                  <th className="px-5 py-4 font-semibold">
-                    Kegiatan
-                  </th>
-                  <th className="px-5 py-4 font-semibold">
-                    Tanggal
-                  </th>
-                  <th className="px-5 py-4 font-semibold">
-                    Check In
-                  </th>
-                  <th className="px-5 py-4 font-semibold">
-                    Check Out
-                  </th>
-                  <th className="px-5 py-4 font-semibold">
-                    Catatan
-                  </th>
+                  <th className="px-5 py-4 font-semibold">Kegiatan</th>
+                  <th className="px-5 py-4 font-semibold">Tanggal</th>
+                  <th className="px-5 py-4 font-semibold">Check In</th>
+                  <th className="px-5 py-4 font-semibold">Check Out</th>
+                  <th className="px-5 py-4 font-semibold">Catatan</th>
                   <th className="px-5 py-4 text-center font-semibold">
                     Status
                   </th>
@@ -291,30 +360,31 @@ export default function AbsensiAnggota() {
                   <tr key={record.id} className="hover:bg-input/60">
                     <td className="px-5 py-4">
                       <p className="font-semibold text-text">
-                        {record.activity?.title ||
+                        {record.activity?.namaKegiatan ||
                           "Kegiatan tidak ditemukan"}
                       </p>
                       <p className="mt-1 text-xs text-text-muted">
-                        {record.activity?.location || "-"}
+                        {record.activity?.lokasi || "-"}
                       </p>
                     </td>
                     <td className="px-5 py-4 text-sm text-text-muted">
                       {formatShortDate(
-                        record.activity?.startAt ||
-                          record.createdAt
+                        record.session?.tanggal ||
+                          record.activity?.waktuMulai ||
+                          waktuRecord(record)
                       )}
                     </td>
                     <td className="px-5 py-4 text-sm text-text-muted">
-                      {formatTime(record.checkInAt)}
+                      {formatTime(waktuCheckIn(record))}
                     </td>
                     <td className="px-5 py-4 text-sm text-text-muted">
-                      {formatTime(record.checkOutAt)}
+                      {formatTime(waktuCheckOut(record))}
                     </td>
                     <td className="max-w-[260px] px-5 py-4 text-sm text-text-muted">
-                      {record.note || "-"}
+                      {catatanRecord(record)}
                     </td>
                     <td className="px-5 py-4 text-center">
-                      <AttendanceBadge status={record.status} />
+                      <StatusKehadiranBadge status={record.statusTampil} />
                     </td>
                   </tr>
                 ))}
@@ -324,5 +394,41 @@ export default function AbsensiAnggota() {
         )}
       </section>
     </div>
+  );
+}
+
+function StatusKehadiranBadge({ status }) {
+  const config = {
+    hadir: {
+      label: "Hadir",
+      className: "bg-emerald-50 text-emerald-700",
+    },
+    terlambat: {
+      label: "Terlambat",
+      className: "bg-amber-50 text-amber-700",
+    },
+    izin: {
+      label: "Izin",
+      className: "bg-blue-50 text-blue-700",
+    },
+    sakit: {
+      label: "Sakit",
+      className: "bg-violet-50 text-violet-700",
+    },
+    alpa: {
+      label: "Alpa",
+      className: "bg-red-50 text-red-700",
+    },
+  }[status] || {
+    label: status || "-",
+    className: "bg-slate-100 text-slate-700",
+  };
+
+  return (
+    <span
+      className={`inline-flex rounded-full px-3 py-1 text-xs font-bold ${config.className}`}
+    >
+      {config.label}
+    </span>
   );
 }
