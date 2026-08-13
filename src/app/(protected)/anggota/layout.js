@@ -29,11 +29,6 @@ const anggotaMenu = [
     icon: "event_available",
   },
   {
-    label: "Upload Proposal",
-    href: "/anggota/upload-proposal",
-    icon: "upload_file",
-  },
-  {
     label: "Pengumuman",
     href: "/anggota/pengumuman",
     icon: "campaign",

@@ -44,6 +44,11 @@ export const CODE_SCHEMES = Object.freeze({
       label: "Meeting",
     }),
   }),
+
+  announcement: Object.freeze({
+    prefix: "PENG",
+    label: "Pengumuman",
+  }),
 });
 
 /**
@@ -499,6 +504,34 @@ export async function buatIdReferensiKegiatan(
         tahun,
     }
   );
+}
+
+/**
+ * =========================================================
+ * KODE PENGUMUMAN
+ * =========================================================
+ *
+ * Contoh:
+ * PENG-2026-001
+ *
+ * Firestore document.id tetap menggunakan Auto ID.
+ */
+export async function generateAnnouncementCode({
+  year = new Date().getFullYear(),
+} = {}) {
+  return generateCode({
+    prefix: CODE_SCHEMES.announcement.prefix,
+    year,
+  });
+}
+
+/**
+ * Nama Indonesia untuk dipakai langsung pada modul Pengumuman.
+ */
+export async function buatIdReferensiPengumuman({
+  tahun = new Date().getFullYear(),
+} = {}) {
+  return generateAnnouncementCode({ year: tahun });
 }
 
 /**

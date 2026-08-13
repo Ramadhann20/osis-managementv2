@@ -200,14 +200,7 @@ export default function DataAnggotaPembina() {
         eyebrow="Database Pengurus"
         title={`Data Anggota OSIS Periode ${currentPeriod}`}
         description="Manajemen tampilan data anggota resmi, jabatan, sekbid, status, dan ringkasan kehadiran."
-        action={
-          <div className="flex flex-wrap gap-3">
-            <DisabledAction icon="download" variant="outline">
-              Export
-            </DisabledAction>
-            <DisabledAction icon="add">Tambah Anggota</DisabledAction>
-          </div>
-        }
+      
       />
 
       <section className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
