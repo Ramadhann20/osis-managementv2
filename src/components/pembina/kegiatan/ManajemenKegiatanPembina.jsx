@@ -82,13 +82,17 @@ export default function ManajemenKegiatanPembina() {
     const petaProposal = new Map(barisProposal.map((item) => [item.id, item]));
     const petaProposalKegiatan = new Map();
 
-    barisProposal.forEach((item) => {
-      if (!item?.idKegiatan) return;
-      const current = petaProposalKegiatan.get(item.idKegiatan);
-      if (!current || Number(item.versi || 0) >= Number(current.versi || 0)) {
-        petaProposalKegiatan.set(item.idKegiatan, item);
-      }
-    });
+    // Proposal yang ditolak tetap tampil pada tab histori Proposal, tetapi
+    // tidak boleh kembali dianggap sebagai proposal aktif milik Kegiatan.
+    barisProposal
+      .filter((item) => item?.status !== STATUS_PROPOSAL.DITOLAK)
+      .forEach((item) => {
+        if (!item?.idKegiatan) return;
+        const current = petaProposalKegiatan.get(item.idKegiatan);
+        if (!current || Number(item.versi || 0) >= Number(current.versi || 0)) {
+          petaProposalKegiatan.set(item.idKegiatan, item);
+        }
+      });
 
     return {
       barisAnggota: barisAnggota.filter((item) =>
@@ -403,11 +407,23 @@ function ProposalsTab({ rows, search, setSearch, statusFilter, setStatusFilter }
                       <BadgeStatus status={proposal.status} jenis="proposal" />
                     </td>
                     <td className="px-5 py-4">
-                      <div className="flex justify-end gap-1">
-                        <IconAction icon="visibility" label="Lihat File" />
-                        <IconAction icon="check" label="Setujui" />
-                        <IconAction icon="edit" label="Revisi" />
-                        <IconAction icon="close" label="Tolak" danger />
+                      <div className="flex flex-col items-end gap-1.5">
+                        {proposal.urlFile ? (
+                          <a
+                            href={proposal.urlFile}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex min-h-9 items-center justify-center gap-2 rounded-xl border border-border bg-card px-3 text-xs font-bold text-text transition hover:border-primary/40 hover:text-primary"
+                          >
+                            <AppIcon name="visibility" size={16} />
+                            Lihat File
+                          </a>
+                        ) : (
+                          <span className="text-xs text-text-muted">File tidak tersedia</span>
+                        )}
+                        <span className="text-[10px] text-text-muted">
+                          Keputusan melalui Detail Kegiatan
+                        </span>
                       </div>
                     </td>
                   </tr>

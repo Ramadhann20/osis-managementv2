@@ -1,10 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 import AppIcon from "@/components/global/AppIcon";
 import { useOverlay } from "@/context/ui/OverlayContext";
+import { useDb } from "@/context/DbContext";
+import { useCollection } from "@/hooks/useCollection";
 import { useCurrentMember } from "@/components/anggota/_shared/useCurrentMember";
+import { isBadanPengurusHarian } from "@/components/anggota/_shared/AksesOrganisasi";
 import { db } from "@/lib/firebase-config";
 import {
   collection,
@@ -171,7 +175,21 @@ export function useKegiatanDetailsOverlay() {
 }
 
 export default function KegiatanDetailsModal({ activity, onClose }) {
+  const router = useRouter();
   const { member } = useCurrentMember();
+  const { colRef } = useDb();
+
+  // Data Divisi diperlukan untuk membedakan BPH dengan anggota Sekbid biasa.
+  // Context existing tetap digunakan; tidak ada perubahan pada DbContext.
+  const divisions = useCollection(() => colRef("Divisi"), [], {
+    enabled: Boolean(member?.id),
+  });
+
+  // Sesi dibaca dari detail kegiatan agar tombol "Lakukan Absensi" hanya
+  // muncul ketika benar-benar ada sesi milik kegiatan yang sedang dibuka.
+  const sessions = useCollection(() => colRef("SesiAbsensi"), [], {
+    enabled: Boolean(member?.id && activity?.id),
+  });
 
   const [visible, setVisible] = useState(false);
   const [selectedProposalFile, setSelectedProposalFile] = useState(null);
@@ -203,12 +221,93 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
   }, []);
 
   const isMeeting = activity?.jenisKegiatan === "rapat";
+
+  // -------------------------------------------------------------------------
+  // HAK AKSES PROPOSAL
+  // -------------------------------------------------------------------------
+  // Semua anggota Sekbid terkait boleh MELIHAT kegiatan berstatus terencana,
+  // tetapi hanya Ketua Sekbid penyelenggara dan BPH yang boleh mengubah /
+  // mengunggah proposal serta usulan peserta.
+  const divisionMap = useMemo(
+    () =>
+      new Map(
+        (Array.isArray(divisions?.rows) ? divisions.rows : []).map((item) => [
+          item.id,
+          item,
+        ])
+      ),
+    [divisions?.rows]
+  );
+
+  const memberDivisionId = member?.idDivisi || member?.divisionId || null;
+  const activityDivisionId = activity?.idDivisi || activity?.divisionId || null;
+  const memberDivision = memberDivisionId
+    ? divisionMap.get(memberDivisionId) || null
+    : null;
+
+  const isBph = isBadanPengurusHarian(memberDivision);
+
+  const jabatan = String(
+    member?.jabatanOrganisasi ||
+      member?.organisationPosition ||
+      member?.jabatan ||
+      ""
+  )
+    .trim()
+    .toLowerCase();
+
+  // Struktur data lama dapat menyimpan jabatan sebagai "Ketua" sedangkan
+  // data baru dapat menyimpan "Ketua Sekbid ...". Keduanya diterima.
+  const isKetuaSekbid =
+    !isBph &&
+    (jabatan === "ketua" || jabatan.startsWith("ketua sekbid"));
+
+  const isKetuaSekbidPenyelenggara =
+    isKetuaSekbid &&
+    Boolean(memberDivisionId) &&
+    Boolean(activityDivisionId) &&
+    memberDivisionId === activityDivisionId;
+
+  // Proposal hanya dikelola selama Program Kerja masih pada tahap terencana.
+  // Setelah finalisasi kegiatan, proposal menjadi read-only bagi Anggota.
+  const canManageProposal =
+    !isMeeting &&
+    activity?.status === "terencana" &&
+    (isBph || isKetuaSekbidPenyelenggara);
+
   const jumlahSesiAbsensi = getJumlahSesiAbsensi(activity);
   const selectedParticipants = useMemo(
     () => participants.filter((item) => item.terpilih),
     [participants]
   );
-  const canSaveProposal = !isMeeting && Boolean(selectedProposalFile || proposalState);
+  const canSaveProposal =
+    canManageProposal && Boolean(selectedProposalFile || proposalState);
+
+  const finalParticipantIds = Array.isArray(activity?.pesertaFinal?.idAnggota)
+    ? activity.pesertaFinal.idAnggota
+    : [];
+  const isFinalParticipant = Boolean(member?.id) && finalParticipantIds.includes(member.id);
+  const activeAttendanceSession = useMemo(
+    () =>
+      (Array.isArray(sessions?.rows) ? sessions.rows : []).find(
+        (session) =>
+          (session?.idKegiatan ?? session?.activityId) === activity?.id &&
+          session?.status === "dibuka"
+      ) || null,
+    [sessions?.rows, activity?.id]
+  );
+  const canDoAttendance =
+    activity?.status === "berlangsung" &&
+    isFinalParticipant &&
+    Boolean(activeAttendanceSession?.id);
+
+  const handleGoToAttendance = () => {
+    if (!canDoAttendance) return;
+    handleClose();
+    window.setTimeout(() => {
+      router.push(`/anggota/absensi?session=${encodeURIComponent(activeAttendanceSession.id)}`);
+    }, 220);
+  };
 
   const handleClose = () => {
     setVisible(false);
@@ -216,10 +315,16 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
   };
 
   const openProposalBrowser = () => {
+    if (!canManageProposal) return;
     proposalInputRef.current?.click();
   };
 
   const handleProposalFileChange = (event) => {
+    if (!canManageProposal) {
+      event.target.value = "";
+      return;
+    }
+
     const file = event.target.files?.[0] || null;
     if (!file) return;
 
@@ -237,12 +342,14 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
   };
 
   const applyParticipantGroup = (rows, source) => {
+    if (!canManageProposal) return;
     setParticipants(rows.map(participantFromMember));
     setParticipantSource(source || null);
     setMessage("");
   };
 
   const addManualParticipants = (rows) => {
+    if (!canManageProposal) return;
     setParticipants((current) => {
       const map = new Map(current.map((item) => [item.id, item]));
 
@@ -270,6 +377,7 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
   };
 
   const toggleParticipant = (id) => {
+    if (!canManageProposal) return;
     setParticipants((current) =>
       current.map((item) =>
         item.id === id ? { ...item, terpilih: !item.terpilih } : item
@@ -278,7 +386,19 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
   };
 
   const handleSaveProposal = async () => {
-    if (!canSaveProposal || saving) return;
+    if (saving) return;
+
+    // UI bukan satu-satunya pembatas. Handler tetap melakukan pengecekan agar
+    // anggota biasa tidak dapat menjalankan proses simpan dari state lokal.
+    if (!canManageProposal) {
+      setError(
+        "Hanya Ketua Sekbid penyelenggara atau anggota BPH yang dapat mengunggah proposal."
+      );
+      return;
+    }
+
+    if (!canSaveProposal) return;
+
     if (!member?.id) {
       setError("Data anggota aktif tidak ditemukan.");
       return;
@@ -523,6 +643,44 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
             </div>
           </section>
 
+          {activity?.status === "berlangsung" && isFinalParticipant && (
+            <section className="mt-6 rounded-3xl border border-primary/20 bg-primary/5 p-5 shadow-sm sm:p-6">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-start gap-3">
+                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-primary text-white">
+                    <AppIcon name="event_available" size={22} />
+                  </span>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-primary">
+                      Absensi Kegiatan
+                    </p>
+                    <h3 className="font-bold text-text">
+                      {activeAttendanceSession
+                        ? "Sesi Absensi Sedang Dibuka"
+                        : "Belum Ada Sesi Absensi Aktif"}
+                    </h3>
+                    <p className="mt-1 text-xs leading-5 text-text-muted">
+                      {activeAttendanceSession
+                        ? "Kamu termasuk peserta kegiatan. Lakukan absensi sebelum sesi ditutup Pembina."
+                        : "Kegiatan sedang berlangsung, tetapi Pembina belum membuka sesi absensi."}
+                    </p>
+                  </div>
+                </div>
+
+                {canDoAttendance && (
+                  <button
+                    type="button"
+                    onClick={handleGoToAttendance}
+                    className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-bold text-white transition hover:bg-primary-hover"
+                  >
+                    <AppIcon name="check" size={18} />
+                    Lakukan Absensi
+                  </button>
+                )}
+              </div>
+            </section>
+          )}
+
           {!isMeeting && (
             <>
               <section className="mt-6 rounded-3xl border border-border bg-card p-5 shadow-sm sm:p-6">
@@ -542,22 +700,28 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
                     </div>
                   </div>
 
-                  <div>
-                    <input
-                      ref={proposalInputRef}
-                      type="file"
-                      onChange={handleProposalFileChange}
-                      className="hidden"
-                    />
-                    <button
-                      type="button"
-                      onClick={openProposalBrowser}
-                      className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-white shadow-sm transition duration-300 hover:-translate-y-0.5 hover:bg-primary-hover hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
-                    >
-                      <AppIcon name="upload_file" size={18} />
-                      {proposalState ? "Ganti File Proposal" : "Upload Proposal"}
-                    </button>
-                  </div>
+                  {canManageProposal ? (
+                    <div>
+                      <input
+                        ref={proposalInputRef}
+                        type="file"
+                        onChange={handleProposalFileChange}
+                        className="hidden"
+                      />
+                      <button
+                        type="button"
+                        onClick={openProposalBrowser}
+                        className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-white shadow-sm transition duration-300 hover:-translate-y-0.5 hover:bg-primary-hover hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
+                      >
+                        <AppIcon name="upload_file" size={18} />
+                        {proposalState ? "Ganti File Proposal" : "Upload Proposal"}
+                      </button>
+                    </div>
+                  ) : (
+                    <span className="rounded-xl border border-border bg-surface px-3 py-2 text-[11px] font-semibold text-text-muted">
+                      Mode lihat saja
+                    </span>
+                  )}
                 </div>
 
                 <div className="mt-5">
@@ -595,14 +759,16 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
                             Belum ada Proposal
                           </p>
                           <p className="mt-1 text-xs leading-5 text-red-600">
-                            Pilih file PDF, DOC, atau DOCX sebelum menyimpan pengajuan.
+                            {canManageProposal
+                              ? "Pilih file PDF, DOC, atau DOCX sebelum menyimpan pengajuan."
+                              : "Proposal belum diajukan oleh Ketua Sekbid penyelenggara atau BPH."}
                           </p>
                         </div>
                       </div>
                     </div>
                   )}
 
-                  {selectedProposalFile && (
+                  {canManageProposal && selectedProposalFile && (
                     <div className="mt-3 flex items-center gap-3 rounded-2xl border border-primary/20 bg-primary/5 px-4 py-3">
                       <AppIcon name="attach_file" size={18} className="text-primary" />
                       <div className="min-w-0 flex-1">
@@ -633,20 +799,23 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
                       </p>
                       <h3 className="font-bold text-text">Usulan Peserta Kegiatan</h3>
                       <p className="mt-1 max-w-xl text-xs leading-5 text-text-muted">
-                        Kamu dapat mengusulkan peserta kepada Pembina. Jika dikosongkan,
-                        penentuan peserta sepenuhnya dilakukan oleh Pembina.
+                        {canManageProposal
+                          ? "Kamu dapat mengusulkan peserta kepada Pembina. Jika dikosongkan, penentuan peserta sepenuhnya dilakukan oleh Pembina."
+                          : "Usulan peserta dapat dilihat oleh seluruh anggota terkait, tetapi hanya Ketua Sekbid penyelenggara dan BPH yang dapat mengubahnya."}
                       </p>
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => setParticipantPickerMode("kelompok")}
-                    className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 text-sm font-bold text-blue-700 transition hover:bg-blue-100"
-                  >
-                    <AppIcon name="groups" size={18} />
-                    {participants.length ? "Ganti Kelompok" : "Pilih Peserta"}
-                  </button>
+                  {canManageProposal && (
+                    <button
+                      type="button"
+                      onClick={() => setParticipantPickerMode("kelompok")}
+                      className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 text-sm font-bold text-blue-700 transition hover:bg-blue-100"
+                    >
+                      <AppIcon name="groups" size={18} />
+                      {participants.length ? "Ganti Kelompok" : "Pilih Peserta"}
+                    </button>
+                  )}
                 </div>
 
                 {participantSource && (
@@ -666,16 +835,26 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
                       {participants.map((participant) => (
                         <label
                           key={participant.id}
-                          className={`flex cursor-pointer items-center gap-3 px-4 py-3 transition ${
+                          className={`flex items-center gap-3 px-4 py-3 transition ${
+                            canManageProposal ? "cursor-pointer" : "cursor-default"
+                          } ${
                             participant.terpilih ? "bg-card" : "bg-surface opacity-60"
                           }`}
                         >
-                          <input
-                            type="checkbox"
-                            checked={participant.terpilih}
-                            onChange={() => toggleParticipant(participant.id)}
-                            className="h-4 w-4 rounded border-border accent-primary"
-                          />
+                          {canManageProposal ? (
+                            <input
+                              type="checkbox"
+                              checked={participant.terpilih}
+                              onChange={() => toggleParticipant(participant.id)}
+                              className="h-4 w-4 rounded border-border accent-primary"
+                            />
+                          ) : (
+                            <span
+                              className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+                                participant.terpilih ? "bg-primary" : "bg-border"
+                              }`}
+                            />
+                          )}
                           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-xs font-bold text-primary">
                             {initials(participant.namaLengkap)}
                           </span>
@@ -695,14 +874,16 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
                       <span className="text-xs font-semibold text-text-muted">
                         {selectedParticipants.length} peserta diusulkan
                       </span>
-                      <button
-                        type="button"
-                        onClick={() => setParticipantPickerMode("manual")}
-                        className="inline-flex min-h-9 items-center justify-center gap-2 rounded-xl border border-dashed border-primary/40 bg-card px-3 text-xs font-bold text-primary transition hover:bg-primary/5"
-                      >
-                        <AppIcon name="person_add" size={17} />
-                        Tambah Peserta
-                      </button>
+                      {canManageProposal && (
+                        <button
+                          type="button"
+                          onClick={() => setParticipantPickerMode("manual")}
+                          className="inline-flex min-h-9 items-center justify-center gap-2 rounded-xl border border-dashed border-primary/40 bg-card px-3 text-xs font-bold text-primary transition hover:bg-primary/5"
+                        >
+                          <AppIcon name="person_add" size={17} />
+                          Tambah Peserta
+                        </button>
+                      )}
                     </div>
                   </div>
                 ) : (
@@ -714,6 +895,14 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
                   </div>
                 )}
               </section>
+
+              {!canManageProposal && activity?.status === "terencana" && (
+                <div className="mt-5 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-700">
+                  Kamu dapat melihat Program Kerja ini karena termasuk Sekbid terkait atau BPH.
+                  Pengunggahan proposal dan perubahan usulan peserta hanya tersedia untuk Ketua
+                  Sekbid penyelenggara dan BPH.
+                </div>
+              )}
 
               {(message || error) && (
                 <div
@@ -745,7 +934,7 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
         </div>
       </section>
 
-      {participantPickerMode && !isMeeting && (
+      {participantPickerMode && !isMeeting && canManageProposal && (
         <PilihPesertaKegiatanOverlay
           mode={participantPickerMode}
           member={member}

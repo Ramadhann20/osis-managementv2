@@ -5,8 +5,10 @@ import { useMemo, useState } from "react";
 import AppIcon from "@/components/global/AppIcon";
 import { useDb } from "@/context/DbContext";
 import { useCollection } from "@/hooks/useCollection";
+import { useCurrentMember } from "@/components/anggota/_shared/useCurrentMember";
 import AksesOrganisasi, {
   ATURAN_AKSES_ORGANISASI,
+  isBadanPengurusHarian,
 } from "@/components/anggota/_shared/AksesOrganisasi";
 import {
   useAjukanRapatOverlay,
@@ -100,6 +102,12 @@ function formatDuration(activity) {
 }
 
 export default function KegiatanAnggota() {
+  const {
+    member,
+    memberId,
+    loading: memberLoading,
+    error: memberError,
+  } = useCurrentMember();
   const { colRef } = useDb();
   const { openAjukanRapat } = useAjukanRapatOverlay();
   const { openKegiatanDetails } = useKegiatanDetailsOverlay();
@@ -120,9 +128,10 @@ export default function KegiatanAnggota() {
   });
 
   const loading =
-    activities.loading || divisions.loading || proposals.loading;
+    memberLoading || activities.loading || divisions.loading || proposals.loading;
 
-  const error = activities.error || divisions.error || proposals.error;
+  const error =
+    memberError || activities.error || divisions.error || proposals.error;
 
   const data = useMemo(() => {
     const divisionMap = new Map(
@@ -133,17 +142,74 @@ export default function KegiatanAnggota() {
     const proposalMap = new Map(
       proposalRows.map((item) => [item.id, item])
     );
-    const proposalByKegiatanMap = new Map(
-      proposalRows
-        .filter((item) => item?.idKegiatan)
-        .map((item) => [item.idKegiatan, item])
-    );
+    // Proposal yang sudah ditolak tidak lagi dianggap proposal aktif ketika
+    // relasinya sudah dilepas dari dokumen Kegiatan. Pilih versi terbaru yang
+    // masih relevan untuk kegiatan tersebut.
+    const proposalByKegiatanMap = new Map();
+    proposalRows
+      .filter((item) => item?.idKegiatan && item?.status !== "ditolak")
+      .forEach((item) => {
+        const current = proposalByKegiatanMap.get(item.idKegiatan);
+        if (!current || Number(item.versi || 0) >= Number(current.versi || 0)) {
+          proposalByKegiatanMap.set(item.idKegiatan, item);
+        }
+      });
 
     // Draf tidak ditampilkan pada halaman Anggota.
     // Pengajuan rapat/program kerja tetap tersimpan di collection Kegiatan,
     // tetapi baru muncul di daftar ini setelah menjadi kegiatan resmi.
     const all = sortKegiatanTerbaru(rowsOf(activities))
       .filter((activity) => activity.status !== STATUS_KEGIATAN.DRAF)
+      .filter((activity) => {
+        if (!memberId) return false;
+
+        const pesertaFinal = Array.isArray(activity?.pesertaFinal?.idAnggota)
+          ? activity.pesertaFinal.idAnggota
+          : [];
+        const panitia = Array.isArray(activity?.idAnggotaPanitia)
+          ? activity.idAnggotaPanitia
+          : [];
+
+        const isResponsible = activity?.idPenanggungJawab === memberId;
+        const isCommittee = panitia.includes(memberId);
+        const isFinalParticipant = pesertaFinal.includes(memberId);
+
+        /**
+         * ================================================================
+         * AKSES PROGRAM KERJA YANG MASIH TERENCANA
+         * ================================================================
+         *
+         * Program Kerja yang masih Terencana dapat dilihat oleh:
+         * 1. seluruh anggota Sekbid penyelenggara, termasuk Ketua Sekbid;
+         * 2. seluruh anggota Badan Pengurus Harian (BPH).
+         *
+         * Hak untuk mengunggah Proposal tetap dibatasi di KegiatanDetailsOverlay
+         * hanya untuk Ketua Sekbid penyelenggara dan BPH.
+         */
+        if (activity.status === STATUS_KEGIATAN.TERENCANA) {
+          const memberDivisionId =
+            member?.idDivisi || member?.divisionId || null;
+          const activityDivisionId =
+            activity?.idDivisi || activity?.divisionId || null;
+          const memberDivision = memberDivisionId
+            ? divisionMap.get(memberDivisionId) || null
+            : null;
+
+          const isBph = isBadanPengurusHarian(memberDivision);
+          const isSameDivision =
+            Boolean(memberDivisionId) &&
+            Boolean(activityDivisionId) &&
+            memberDivisionId === activityDivisionId;
+
+          return isBph || isSameDivision;
+        }
+
+        /**
+         * Setelah kegiatan difinalisasi, visibility kembali mengikuti peserta
+         * yang benar-benar terlibat pada kegiatan.
+         */
+        return isResponsible || isCommittee || isFinalParticipant;
+      })
       .map((activity) => ({
       ...activity,
       divisi: activity.idDivisi
@@ -184,7 +250,19 @@ export default function KegiatanAnggota() {
         (item) => item.status === STATUS_KEGIATAN.SELESAI
       ).length,
     };
-  }, [activities, divisions, proposals, search, statusFilter]);
+  }, [
+    activities,
+    divisions,
+    proposals,
+    memberId,
+    member?.idDivisi,
+    member?.divisionId,
+    member?.jabatanOrganisasi,
+    member?.organisationPosition,
+    member?.jabatan,
+    search,
+    statusFilter,
+  ]);
 
   if (loading) {
     return <PageLoading message="Memuat kegiatan OSIS..." />;
@@ -321,22 +399,27 @@ function ActivityCard({ activity, onDetail }) {
   const proposal = activity.proposal || null;
 
   return (
-    <article className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm transition duration-300 hover:-translate-y-0.5 hover:shadow-md">
-      <div className="flex items-start justify-between gap-4 border-b border-border p-5">
+    <button
+      type="button"
+      onClick={onDetail}
+      className="w-full overflow-hidden rounded-2xl border border-border bg-card text-left shadow-sm transition duration-300 hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2"
+      aria-label={`Buka detail ${activity.namaKegiatan || "kegiatan"}`}
+    >
+      <div className="border-b border-border p-5">
         <div className="flex min-w-0 items-start gap-4">
           <div className="flex h-14 w-14 shrink-0 flex-col items-center justify-center rounded-2xl bg-primary text-white">
             <span className="text-[10px] font-semibold uppercase">
               {startDate
-                ? new Intl.DateTimeFormat("id-ID", {
-                    month: "short",
-                  }).format(startDate)
+                ? new Intl.DateTimeFormat("id-ID", { month: "short" }).format(
+                    startDate
+                  )
                 : "-"}
             </span>
             <span className="text-xl font-bold leading-none">
               {startDate
-                ? new Intl.DateTimeFormat("id-ID", {
-                    day: "2-digit",
-                  }).format(startDate)
+                ? new Intl.DateTimeFormat("id-ID", { day: "2-digit" }).format(
+                    startDate
+                  )
                 : "-"}
             </span>
           </div>
@@ -358,15 +441,6 @@ function ActivityCard({ activity, onDetail }) {
             </p>
           </div>
         </div>
-
-        <button
-          type="button"
-          onClick={onDetail}
-          aria-label="Lihat detail kegiatan"
-          className="rounded-lg p-2 text-text-muted transition hover:bg-surface hover:text-primary"
-        >
-          <AppIcon name="more_vert" size={20} />
-        </button>
       </div>
 
       <div className="grid grid-cols-1 gap-4 p-5 sm:grid-cols-2">
@@ -379,15 +453,12 @@ function ActivityCard({ activity, onDetail }) {
         {isMeeting ? (
           <MetaItem label="Durasi" value={formatDuration(activity)} />
         ) : (
-          <MetaItem
-            label="Jadwal"
-            value={labelStatusJadwal(activity.statusJadwal)}
-          />
+          <MetaItem label="Jadwal" value={labelStatusJadwal(activity.statusJadwal)} />
         )}
       </div>
 
-      <div className={`flex flex-col gap-3 border-t border-border bg-surface px-5 py-4 sm:flex-row sm:items-center ${isMeeting ? "sm:justify-end" : "sm:justify-between"}`}>
-        {!isMeeting && (
+      {!isMeeting && (
+        <div className="border-t border-border bg-surface px-5 py-4">
           <p className="min-w-0 text-xs text-text-muted">
             Proposal:{" "}
             {proposal ? (
@@ -401,18 +472,9 @@ function ActivityCard({ activity, onDetail }) {
               <span className="font-bold text-red-600">Belum ada Proposal</span>
             )}
           </p>
-        )}
-
-        <button
-          type="button"
-          onClick={onDetail}
-          className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border border-border bg-card px-4 text-sm font-semibold text-text transition duration-300 hover:border-primary/40 hover:bg-primary/5 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 sm:min-w-32"
-        >
-          Detail
-          <AppIcon name="chevron_right" size={18} />
-        </button>
-      </div>
-    </article>
+        </div>
+      )}
+    </button>
   );
 }
 

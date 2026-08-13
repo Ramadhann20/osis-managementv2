@@ -206,9 +206,24 @@ export default function DashboardAnggota() {
         };
       });
 
+    const isInvolved = (activity) => {
+      const participants = Array.isArray(activity?.pesertaFinal?.idAnggota)
+        ? activity.pesertaFinal.idAnggota
+        : [];
+      const committee = Array.isArray(activity?.idAnggotaPanitia)
+        ? activity.idAnggotaPanitia
+        : [];
+      return (
+        participants.includes(memberId) ||
+        committee.includes(memberId) ||
+        activity?.idPenanggungJawab === memberId
+      );
+    };
+
     const upcomingActivities = [...activityRows]
       .filter((activity) =>
-        ["akan_datang", "berlangsung"].includes(activity.status)
+        ["akan_datang", "berlangsung"].includes(activity.status) &&
+        isInvolved(activity)
       )
       .sort((a, b) => {
         const dateA = toDate(a.waktuMulai)?.getTime() || 0;
@@ -227,11 +242,7 @@ export default function DashboardAnggota() {
       (item) => item.publishedAt ?? item.diterbitkanPada ?? item.dibuatPada
     ).slice(0, 4);
 
-    const joinedActivities = activityRows.filter(
-      (activity) =>
-        activity.idPenanggungJawab === memberId ||
-        activity.idAnggotaPanitia?.includes(memberId)
-    );
+    const joinedActivities = activityRows.filter(isInvolved);
 
     const division = divisionRows.find((item) => item.id === member?.idDivisi);
 
@@ -273,7 +284,11 @@ export default function DashboardAnggota() {
 
   const attendancePercentage =
     data.summary?.persentaseKehadiran ??
-    calculateAttendancePercentage(rowsOf(attendance));
+    calculateAttendancePercentage(
+      rowsOf(attendance).filter(
+        (item) => !item?.statusVerifikasi || item.statusVerifikasi === "dikonfirmasi"
+      )
+    );
 
   const pendingProposalCount = rowsOf(proposals).filter((item) =>
     ["menunggu_review", "perlu_revisi"].includes(item.status)
