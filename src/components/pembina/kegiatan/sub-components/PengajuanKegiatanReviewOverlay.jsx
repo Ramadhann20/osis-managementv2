@@ -7,10 +7,11 @@ import { formatDateTime } from "@/components/pembina/_shared/firestoreHelpers";
 import { useDb } from "@/context/DbContext";
 import { useOverlay } from "@/context/ui/OverlayContext";
 import { useCollection } from "@/hooks/useCollection";
-import { db as firestoreDb } from "@/lib/firebase-config";
 import {
   JENIS_KEGIATAN,
+  MODE_JADWAL,
   STATUS_KEGIATAN,
+  SUMBER_FINALISASI_JADWAL,
 } from "../konfigurasiManajemenKegiatan";
 import PilihPesertaKegiatanOverlay from "./PilihPesertaKegiatanOverlay";
 import { finalisasiKegiatan } from "./finalisasiKegiatan";
@@ -24,6 +25,54 @@ const STATUS_PENGAJUAN = Object.freeze({
 
 function rowsOf(result) {
   return Array.isArray(result?.rows) ? result.rows : [];
+}
+
+function toDate(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value?.toDate === "function") return value.toDate();
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function pad(value) {
+  return String(value).padStart(2, "0");
+}
+
+function toDateKey(value) {
+  const date = toDate(value);
+  if (!date) return "";
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function toTimeKey(value) {
+  const date = toDate(value);
+  if (!date) return "";
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function combineDateTime(date, time) {
+  if (!date || !time) return null;
+  const value = new Date(`${date}T${time}:00`);
+  return Number.isNaN(value.getTime()) ? null : value;
+}
+
+function durationMinutes(startTime, endTime) {
+  const start = combineDateTime("2000-01-01", startTime);
+  const end = combineDateTime("2000-01-01", endTime);
+  if (!start || !end) return 0;
+  const diff = Math.floor((end.getTime() - start.getTime()) / 60000);
+  return diff > 0 ? diff : 0;
+}
+
+function durationLabel(minutes) {
+  const value = Number(minutes);
+  if (!Number.isFinite(value) || value <= 0) return "-";
+  const hours = Math.floor(value / 60);
+  const rest = value % 60;
+  return [hours ? `${hours} jam` : "", rest ? `${rest} menit` : ""]
+    .filter(Boolean)
+    .join(" ");
 }
 
 function labelDivisi(divisi) {
@@ -55,17 +104,6 @@ function statusClass(status) {
   );
 }
 
-function durationLabel(minutes) {
-  const value = Number(minutes);
-  if (!Number.isFinite(value) || value <= 0) return "-";
-
-  const jam = Math.floor(value / 60);
-  const menit = value % 60;
-  return [jam ? `${jam} jam` : "", menit ? `${menit} menit` : ""]
-    .filter(Boolean)
-    .join(" ");
-}
-
 function initials(value) {
   return String(value || "A")
     .trim()
@@ -74,6 +112,47 @@ function initials(value) {
     .slice(0, 2)
     .map((part) => part[0]?.toUpperCase())
     .join("");
+}
+
+function buildInitialSchedule(activity) {
+  const source = activity?.jadwalFinal || activity?.jadwalRencana || null;
+  const start = toDate(activity?.waktuMulai);
+  const end = toDate(activity?.waktuSelesai);
+  const firstTemplate = Array.isArray(source?.templateSesi)
+    ? source.templateSesi[0]
+    : null;
+
+  return {
+    tanggal:
+      source?.tanggalMulaiPertama ||
+      source?.tanggalSelesaiPertama ||
+      toDateKey(start) ||
+      "",
+    waktuMulai: firstTemplate?.jamMulai || toTimeKey(start) || "",
+    waktuSelesai: firstTemplate?.jamSelesai || toTimeKey(end) || "",
+    lokasi: activity?.lokasi || "",
+  };
+}
+
+function buildFinalSchedule(schedule) {
+  const minutes = durationMinutes(schedule.waktuMulai, schedule.waktuSelesai);
+
+  return {
+    modeJadwal: MODE_JADWAL.SEKALI,
+    tanggalMulaiPertama: schedule.tanggal,
+    tanggalSelesaiPertama: schedule.tanggal,
+    jumlahHariPerPelaksanaan: 1,
+    jamMulaiDefault: schedule.waktuMulai,
+    jamSelesaiDefault: schedule.waktuSelesai,
+    templateSesi: [
+      {
+        selisihHari: 0,
+        jamMulai: schedule.waktuMulai,
+        jamSelesai: schedule.waktuSelesai,
+        durasiMenit: minutes,
+      },
+    ],
+  };
 }
 
 export function usePengajuanKegiatanReviewOverlay() {
@@ -101,7 +180,7 @@ export function usePengajuanKegiatanReviewOverlay() {
 }
 
 export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
-  const { colRef, updateDoc, serverTimestamp } = useDb();
+  const { db, colRef, updateDoc, serverTimestamp } = useDb();
   const [visible, setVisible] = useState(false);
   const [participantPickerMode, setParticipantPickerMode] = useState(null);
   const [selectedParticipantIds, setSelectedParticipantIds] = useState(
@@ -123,6 +202,7 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
   const [reviewNote, setReviewNote] = useState(
     activity?.pengajuanRapat?.catatanReview || ""
   );
+  const [schedule, setSchedule] = useState(() => buildInitialSchedule(activity));
   const [savingReview, setSavingReview] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [finalized, setFinalized] = useState(
@@ -147,10 +227,18 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
     () => new Map(rowsOf(anggota).map((item) => [item.id, item])),
     [anggota]
   );
+
   const divisionMap = useMemo(
     () => new Map(rowsOf(divisi).map((item) => [item.id, item])),
     [divisi]
   );
+
+  const isMeeting = activity?.jenisKegiatan === JENIS_KEGIATAN.RAPAT;
+  const pengaju =
+    activity?.pengaju || memberMap.get(activity?.pengajuanRapat?.idPengaju) || null;
+  const divisiPengaju =
+    activity?.divisi ||
+    (pengaju?.idDivisi ? divisionMap.get(pengaju.idDivisi) || null : null);
 
   const selectedParticipantRows = useMemo(
     () =>
@@ -174,10 +262,14 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
     [selectedParticipantIds, memberMap, divisionMap]
   );
 
-  const isMeeting = activity?.jenisKegiatan === JENIS_KEGIATAN.RAPAT;
-  const pengaju = activity?.pengaju || memberMap.get(activity?.pengajuanRapat?.idPengaju);
-  const divisiPengaju = activity?.divisi ||
-    (pengaju?.idDivisi ? divisionMap.get(pengaju.idDivisi) || null : null);
+  const finalDuration = durationMinutes(schedule.waktuMulai, schedule.waktuSelesai);
+  const scheduleValid = Boolean(
+    schedule.tanggal &&
+      schedule.waktuMulai &&
+      schedule.waktuSelesai &&
+      finalDuration > 0 &&
+      schedule.lokasi.trim().length >= 3
+  );
 
   const handleClose = () => {
     setVisible(false);
@@ -213,6 +305,15 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
   const updateReviewStatus = async (nextStatus) => {
     if (!activity?.id || savingReview || finalizing || finalized) return;
 
+    if (
+      nextStatus === STATUS_PENGAJUAN.DITOLAK &&
+      !window.confirm(
+        `Tolak pengajuan rapat “${activity?.namaKegiatan || "Rapat"}”? Pengajuan tidak akan dibuat menjadi kegiatan resmi.`
+      )
+    ) {
+      return;
+    }
+
     setSavingReview(true);
     setError("");
     setMessage("");
@@ -235,7 +336,7 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
       setMessage(
         nextStatus === STATUS_PENGAJUAN.PERLU_REVISI
           ? "Pengajuan dikembalikan untuk diperbaiki oleh anggota."
-          : "Pengajuan rapat ditolak. Tidak ada sesi absensi yang dibuat."
+          : "Pengajuan rapat ditolak. Tidak ada PelaksanaanKegiatan atau SesiAbsensi yang dibuat."
       );
     } catch (reviewError) {
       console.error("REVIEW PENGAJUAN RAPAT ERROR:", reviewError);
@@ -255,37 +356,77 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
       return;
     }
 
+    if (!scheduleValid) {
+      setError(
+        "Periksa jadwal final. Tanggal, lokasi, waktu mulai, dan waktu selesai harus valid."
+      );
+      return;
+    }
+
     setFinalizing(true);
     setError("");
     setMessage("");
 
     try {
+      const finalSchedule = buildFinalSchedule(schedule);
+      const startAt = combineDateTime(schedule.tanggal, schedule.waktuMulai);
+      const endAt = combineDateTime(schedule.tanggal, schedule.waktuSelesai);
+
       const activityForFinalization = {
         ...activity,
+        lokasi: schedule.lokasi.trim(),
+        waktuMulai: startAt,
+        waktuSelesai: endAt,
+        waktuSelesaiSeri: endAt,
+        durasiMenit: finalDuration,
+        jadwalFinal: finalSchedule,
+        pengulanganFinal: {
+          cakupan: "periode",
+          aktif: false,
+          frekuensi: null,
+          interval: null,
+          sampai: null,
+        },
+        sumberFinalisasiJadwal: SUMBER_FINALISASI_JADWAL.MANUAL,
         pengajuanRapat: {
           ...(activity?.pengajuanRapat || {}),
+          status: STATUS_PENGAJUAN.DISETUJUI,
           catatanReview: reviewNote.trim() || null,
+          jadwalFinalPembina: {
+            tanggal: schedule.tanggal,
+            waktuMulai: schedule.waktuMulai,
+            waktuSelesai: schedule.waktuSelesai,
+            lokasi: schedule.lokasi.trim(),
+          },
         },
       };
 
       const result = await finalisasiKegiatan({
-        db: firestoreDb,
+        db,
         activity: activityForFinalization,
         participantIds: Array.from(selectedParticipantIds),
         serverTimestamp,
         updateDoc,
       });
 
+      // finalisasiKegiatan menangani status, peserta final, jadwal final,
+      // PelaksanaanKegiatan, dan SesiAbsensi. Lokasi juga disimpan eksplisit
+      // karena field tersebut bukan bagian dari payload update finalisasi lama.
+      await updateDoc("Kegiatan", activity.id, {
+        lokasi: schedule.lokasi.trim(),
+        diperbaruiPada: serverTimestamp(),
+      });
+
       setReviewStatus(STATUS_PENGAJUAN.DISETUJUI);
       setFinalized(true);
       setMessage(
-        `Rapat disetujui dan menjadi Akan Datang. ${result.jumlahPelaksanaan} pelaksanaan serta ${result.jumlahSesiAbsensi} sesi absensi berhasil dibuat.`
+        `Rapat disetujui dan difinalisasi. ${result.jumlahPelaksanaan} pelaksanaan serta ${result.jumlahSesiAbsensi} sesi absensi berhasil dibuat.`
       );
     } catch (finalizeError) {
       console.error("SETUJUI PENGAJUAN RAPAT ERROR:", finalizeError);
       setError(
         finalizeError?.message ||
-          "Pengajuan belum berhasil disetujui. Periksa jadwal dan izin Firestore."
+          "Pengajuan belum berhasil difinalisasi. Periksa jadwal, peserta, dan izin Firestore."
       );
     } finally {
       setFinalizing(false);
@@ -295,7 +436,7 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
   return (
     <>
       <section
-        className={`flex max-h-[calc(100dvh-2rem)] w-[min(96vw,940px)] flex-col overflow-hidden rounded-[28px] border border-border bg-card shadow-2xl transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+        className={`flex max-h-[calc(100dvh-2rem)] w-[min(96vw,980px)] flex-col overflow-hidden rounded-[28px] border border-border bg-card shadow-2xl transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
           visible
             ? "translate-y-0 scale-100 opacity-100"
             : "translate-y-5 scale-[0.975] opacity-0"
@@ -317,21 +458,25 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
                 >
                   {labelStatus(reviewStatus)}
                 </span>
+                <span className="inline-flex rounded-full bg-slate-100 px-3 py-1 text-[10px] font-bold text-slate-700">
+                  Tanpa Proposal
+                </span>
               </div>
 
               <h2 className="mt-3 text-xl font-bold tracking-tight text-text sm:text-2xl">
                 {activity?.namaKegiatan || "Rapat tanpa judul"}
               </h2>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-text-muted">
-                Review jadwal dan peserta. Saat disetujui, rapat langsung menjadi
-                kegiatan Akan Datang dan sistem membuat PelaksanaanKegiatan serta
-                SesiAbsensi secara otomatis.
+                Review agenda, koreksi jadwal, dan tetapkan peserta. Rapat tidak
+                membutuhkan proposal. Finalisasi langsung membuat PelaksanaanKegiatan
+                dan SesiAbsensi.
               </p>
             </div>
 
             <button
               type="button"
               onClick={handleClose}
+              aria-label="Tutup review pengajuan rapat"
               className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-border bg-card text-text-muted transition hover:bg-surface hover:text-text"
             >
               <AppIcon name="close" size={22} />
@@ -341,12 +486,13 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
 
         <div className="overflow-y-auto px-5 py-5 sm:px-7 sm:py-6">
           {!isMeeting && (
-            <div className="mb-5 rounded-2xl bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
-              Overlay review ini saat ini difokuskan untuk Pengajuan Rapat.
+            <div className="mb-5 rounded-2xl bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+              Data ini bukan Pengajuan Rapat. Review dibatalkan agar tidak mengubah
+              flow Program Kerja yang menggunakan proposal.
             </div>
           )}
 
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.25fr_0.75fr]">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.3fr_0.7fr]">
             <section className="rounded-3xl border border-border bg-surface p-5 sm:p-6">
               <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-blue-700">
                 Agenda Rapat
@@ -354,6 +500,17 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
               <p className="mt-3 whitespace-pre-line text-sm leading-7 text-text-muted">
                 {activity?.deskripsi || "Belum ada agenda rapat."}
               </p>
+
+              {activity?.pengajuanRapat?.catatanTambahan && (
+                <div className="mt-5 rounded-2xl border border-border bg-card p-4">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
+                    Catatan Pengaju
+                  </p>
+                  <p className="mt-2 text-sm leading-6 text-text">
+                    {activity.pengajuanRapat.catatanTambahan}
+                  </p>
+                </div>
+              )}
             </section>
 
             <div className="space-y-3">
@@ -368,43 +525,107 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
                 label="Divisi / Sekbid"
                 value={labelDivisi(divisiPengaju)}
               />
+              <InfoCard
+                icon="schedule"
+                label="Diajukan"
+                value={formatDateTime(activity?.pengajuanRapat?.diajukanPada)}
+              />
             </div>
           </div>
 
           <section className="mt-5 overflow-hidden rounded-3xl border border-border bg-card shadow-sm">
             <div className="flex items-center gap-3 border-b border-border bg-blue-50 px-5 py-4 sm:px-6">
               <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white">
-                <AppIcon name="calendar_month" size={20} />
+                <AppIcon name="edit_calendar" size={20} />
               </span>
               <div>
                 <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-blue-700">
-                  Usulan Jadwal
+                  Jadwal Final Pembina
                 </p>
-                <h3 className="font-bold text-text">Jadwal yang Akan Difinalisasi</h3>
+                <h3 className="font-bold text-text">Koreksi Sebelum Finalisasi</h3>
+                <p className="mt-1 text-xs leading-5 text-text-muted">
+                  Nilai awal berasal dari usulan anggota. Pembina boleh mengubahnya
+                  sebelum rapat disetujui.
+                </p>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 divide-y divide-border sm:grid-cols-3 sm:divide-x sm:divide-y-0">
-              <ScheduleCell
-                icon="schedule"
-                label="Mulai"
-                value={formatDateTime(activity?.waktuMulai)}
-              />
-              <ScheduleCell
-                icon="event_available"
-                label="Selesai"
-                value={formatDateTime(activity?.waktuSelesai)}
-              />
-              <ScheduleCell
-                icon="timer"
-                label="Durasi"
-                value={durationLabel(activity?.durasiMenit)}
-              />
+            <div className="grid grid-cols-1 gap-4 p-5 sm:grid-cols-2 sm:p-6">
+              <Field label="Tanggal Rapat">
+                <input
+                  type="date"
+                  disabled={finalized}
+                  value={schedule.tanggal}
+                  onChange={(event) =>
+                    setSchedule((current) => ({
+                      ...current,
+                      tanggal: event.target.value,
+                    }))
+                  }
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field label="Lokasi">
+                <input
+                  type="text"
+                  disabled={finalized}
+                  value={schedule.lokasi}
+                  onChange={(event) =>
+                    setSchedule((current) => ({
+                      ...current,
+                      lokasi: event.target.value,
+                    }))
+                  }
+                  placeholder="Contoh: Ruang OSIS"
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field label="Waktu Mulai">
+                <input
+                  type="time"
+                  disabled={finalized}
+                  value={schedule.waktuMulai}
+                  onChange={(event) =>
+                    setSchedule((current) => ({
+                      ...current,
+                      waktuMulai: event.target.value,
+                    }))
+                  }
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field label="Waktu Selesai">
+                <input
+                  type="time"
+                  disabled={finalized}
+                  value={schedule.waktuSelesai}
+                  onChange={(event) =>
+                    setSchedule((current) => ({
+                      ...current,
+                      waktuSelesai: event.target.value,
+                    }))
+                  }
+                  className={inputClass}
+                />
+              </Field>
             </div>
 
-            <div className="border-t border-border px-5 py-4 text-sm text-text-muted sm:px-6">
-              <span className="font-semibold text-text">Lokasi:</span>{" "}
-              {activity?.lokasi || "Belum ditentukan"}
+            <div className="grid grid-cols-1 divide-y divide-border border-t border-border sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+              <MiniSchedule
+                label="Usulan Awal"
+                value={formatDateTime(activity?.waktuMulai)}
+              />
+              <MiniSchedule
+                label="Durasi Final"
+                value={durationLabel(finalDuration)}
+              />
+              <MiniSchedule
+                label="Status Jadwal"
+                value={scheduleValid ? "Siap difinalisasi" : "Perlu diperiksa"}
+              />
             </div>
           </section>
 
@@ -418,11 +639,10 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
                   <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-primary">
                     Peserta Rapat
                   </p>
-                  <h3 className="font-bold text-text">Review Peserta</h3>
+                  <h3 className="font-bold text-text">Finalisasi Peserta</h3>
                   <p className="mt-1 max-w-xl text-xs leading-5 text-text-muted">
-                    Daftar awal berasal dari pengajuan anggota. Pembina tetap dapat
-                    mengubah kelompok, menambah, atau menghapus peserta sebelum rapat
-                    disetujui.
+                    Daftar awal berasal dari pengajuan anggota. Pembina dapat mengganti
+                    kelompok, menambah, atau menghapus peserta sebelum finalisasi.
                   </p>
                 </div>
               </div>
@@ -496,7 +716,7 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
               <div className="mt-4 rounded-2xl border border-dashed border-border bg-surface p-5 text-center">
                 <p className="text-sm font-bold text-text">Belum ada peserta</p>
                 <p className="mt-1 text-xs text-text-muted">
-                  Minimal satu peserta diperlukan sebelum sesi absensi dibuat.
+                  Minimal satu peserta diperlukan sebelum rapat difinalisasi.
                 </p>
               </div>
             )}
@@ -512,7 +732,7 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
                   maxLength={500}
                   value={reviewNote}
                   onChange={(event) => setReviewNote(event.target.value)}
-                  placeholder="Tuliskan alasan revisi, penolakan, atau catatan sebelum rapat disetujui."
+                  placeholder="Tuliskan alasan revisi, penolakan, atau catatan finalisasi."
                   className="mt-2 w-full resize-y rounded-xl border border-border bg-card px-4 py-3 text-sm text-text outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
                 />
               </label>
@@ -536,7 +756,7 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
           {finalized ? (
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <p className="text-xs font-bold text-emerald-700">
-                Rapat sudah disetujui dan sesi absensi telah dibuat.
+                Rapat sudah menjadi kegiatan resmi dan sesi absensi telah dibuat.
               </p>
               <button
                 type="button"
@@ -548,15 +768,16 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
             </div>
           ) : (
             <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-              <p className="max-w-md text-xs leading-5 text-text-muted">
-                Tombol Setujui akan memfinalisasi jadwal, menetapkan peserta, mengubah
-                status menjadi Akan Datang, lalu membuat sesi absensi otomatis.
+              <p className="max-w-lg text-xs leading-5 text-text-muted">
+                Rapat tidak membutuhkan proposal. Setujui & Finalisasi akan menetapkan
+                jadwal dan peserta, mengubah status menjadi Akan Datang, lalu membuat
+                sesi absensi.
               </p>
 
               <div className="flex flex-wrap justify-end gap-2">
                 <button
                   type="button"
-                  disabled={savingReview || finalizing}
+                  disabled={savingReview || finalizing || !isMeeting}
                   onClick={() => updateReviewStatus(STATUS_PENGAJUAN.PERLU_REVISI)}
                   className="min-h-11 rounded-xl border border-amber-200 bg-amber-50 px-4 text-sm font-bold text-amber-700 transition hover:bg-amber-100 disabled:opacity-50"
                 >
@@ -564,17 +785,18 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
                 </button>
                 <button
                   type="button"
-                  disabled={savingReview || finalizing}
+                  disabled={savingReview || finalizing || !isMeeting}
                   onClick={() => updateReviewStatus(STATUS_PENGAJUAN.DITOLAK)}
                   className="min-h-11 rounded-xl border border-red-200 bg-red-50 px-4 text-sm font-bold text-red-700 transition hover:bg-red-100 disabled:opacity-50"
                 >
-                  Tolak
+                  Tolak Pengajuan
                 </button>
                 <button
                   type="button"
                   disabled={
                     !isMeeting ||
                     !selectedParticipantIds.size ||
+                    !scheduleValid ||
                     savingReview ||
                     finalizing
                   }
@@ -582,7 +804,7 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
                   className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-bold text-white transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <AppIcon name="check_circle" size={19} />
-                  {finalizing ? "Membuat sesi..." : "Setujui & Buat Sesi Absensi"}
+                  {finalizing ? "Memfinalisasi..." : "Setujui & Finalisasi Rapat"}
                 </button>
               </div>
             </div>
@@ -590,11 +812,11 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
         </footer>
       </section>
 
-      {participantPickerMode && (
+      {participantPickerMode && !finalized && (
         <PilihPesertaKegiatanOverlay
           mode={participantPickerMode}
-          member={pengaju || null}
-          divisi={divisiPengaju || null}
+          member={pengaju || { idDivisi: activity?.idDivisi }}
+          divisi={divisiPengaju || activity?.divisi || null}
           existingParticipantIds={Array.from(selectedParticipantIds)}
           onApplyGroup={applyParticipantGroup}
           onAddMembers={addManualParticipants}
@@ -602,6 +824,20 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
         />
       )}
     </>
+  );
+}
+
+const inputClass =
+  "mt-2 min-h-11 w-full rounded-xl border border-border bg-input px-4 text-sm text-text outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/15 disabled:cursor-not-allowed disabled:opacity-60";
+
+function Field({ label, children }) {
+  return (
+    <label className="block">
+      <span className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
+        {label}
+      </span>
+      {children}
+    </label>
   );
 }
 
@@ -616,7 +852,7 @@ function InfoCard({ icon, label, value, helper = "" }) {
           <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
             {label}
           </p>
-          <p className="mt-1 truncate text-sm font-bold text-text">{value || "-"}</p>
+          <p className="mt-1 text-sm font-bold leading-6 text-text">{value || "-"}</p>
           {helper && <p className="mt-0.5 text-xs text-text-muted">{helper}</p>}
         </div>
       </div>
@@ -624,20 +860,13 @@ function InfoCard({ icon, label, value, helper = "" }) {
   );
 }
 
-function ScheduleCell({ icon, label, value }) {
+function MiniSchedule({ label, value }) {
   return (
-    <div className="p-5">
-      <div className="flex items-start gap-3">
-        <AppIcon name={icon} size={19} className="mt-0.5 shrink-0 text-blue-700" />
-        <div>
-          <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
-            {label}
-          </p>
-          <p className="mt-1.5 text-sm font-semibold leading-6 text-text">
-            {value || "-"}
-          </p>
-        </div>
-      </div>
+    <div className="p-4 sm:p-5">
+      <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
+        {label}
+      </p>
+      <p className="mt-1.5 text-sm font-semibold leading-6 text-text">{value || "-"}</p>
     </div>
   );
 }

@@ -127,7 +127,11 @@ export function adalahDrafPengajuanAnggota(kegiatan) {
   return adalahPengajuanKegiatanAnggota(kegiatan) && kegiatan?.status === "draf";
 }
 
-export default function PengajuanKegiatanCollapsible({ rows = [], onOpenReview }) {
+export default function PengajuanKegiatanCollapsible({
+  rows = [],
+  jenisKegiatan = null,
+  onOpenReview,
+}) {
   const [isOpen, setIsOpen] = useState(false);
   const contentId = useId();
 
@@ -135,6 +139,7 @@ export default function PengajuanKegiatanCollapsible({ rows = [], onOpenReview }
     () =>
       rows
         .filter(adalahDrafPengajuanAnggota)
+        .filter((item) => !jenisKegiatan || item.jenisKegiatan === jenisKegiatan)
         .map((item) => ({
           ...item,
           metadataPengajuan: ambilPengajuanKegiatan(item),
@@ -150,7 +155,7 @@ export default function PengajuanKegiatanCollapsible({ rows = [], onOpenReview }
             0;
           return waktuB - waktuA;
         }),
-    [rows]
+    [rows, jenisKegiatan]
   );
 
   const menungguReview = pengajuanRows.filter(
@@ -169,12 +174,16 @@ export default function PengajuanKegiatanCollapsible({ rows = [], onOpenReview }
       >
         <div className="flex min-w-0 items-start gap-3">
           <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-amber-50 text-amber-700">
-            <AppIcon name="assignment_add" size={23} />
+            <AppIcon name="assignment_turned_in" size={23} />
           </div>
 
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="font-bold text-text">Pengajuan Kegiatan</h2>
+              <h2 className="font-bold text-text">
+                {jenisKegiatan === JENIS_KEGIATAN.RAPAT
+                  ? "Pengajuan Rapat Anggota"
+                  : "Pengajuan Kegiatan"}
+              </h2>
 
               <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">
                 {menungguReview} menunggu review
@@ -188,7 +197,9 @@ export default function PengajuanKegiatanCollapsible({ rows = [], onOpenReview }
             </div>
 
             <p className="mt-1 text-xs leading-5 text-text-muted">
-              Daftar pengajuan rapat atau program kerja dari anggota yang belum menjadi kegiatan resmi.
+              {jenisKegiatan === JENIS_KEGIATAN.RAPAT
+                ? "Rapat yang diajukan anggota menunggu keputusan dan finalisasi Pembina. Rapat tidak membutuhkan proposal."
+                : "Daftar pengajuan dari anggota yang belum menjadi kegiatan resmi."}
             </p>
           </div>
         </div>
@@ -247,9 +258,17 @@ export default function PengajuanKegiatanCollapsible({ rows = [], onOpenReview }
             ) : (
               <div className="p-5">
                 <EmptyState
-                  icon="assignment_add"
-                  title="Belum ada pengajuan kegiatan"
-                  description="Pengajuan rapat atau program kerja dari anggota akan tampil di bagian ini."
+                  icon="assignment_turned_in"
+                  title={
+                    jenisKegiatan === JENIS_KEGIATAN.RAPAT
+                      ? "Belum ada pengajuan rapat"
+                      : "Belum ada pengajuan kegiatan"
+                  }
+                  description={
+                    jenisKegiatan === JENIS_KEGIATAN.RAPAT
+                      ? "Pengajuan rapat dari anggota akan tampil di bagian ini."
+                      : "Pengajuan kegiatan dari anggota akan tampil di bagian ini."
+                  }
                 />
               </div>
             )}

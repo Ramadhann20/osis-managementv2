@@ -143,6 +143,12 @@ export default function RapatSection({
                       Jadwal ditetapkan
                     </span>
                   )}
+                  {activity?.pengajuanRapat?.sumber === "anggota" && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2.5 py-1 text-[10px] font-bold text-violet-700 ring-1 ring-inset ring-violet-200">
+                      <AppIcon name="assignment_turned_in" size={13} />
+                      Dari Pengajuan Anggota
+                    </span>
+                  )}
                 </div>
               </button>
             );

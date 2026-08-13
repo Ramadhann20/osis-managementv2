@@ -373,8 +373,8 @@ export default function AjukanRapatModal({ member, divisi, onClose }) {
               Ajukan Rapat OSIS
             </h2>
             <p className="mt-2 max-w-xl text-sm leading-6 text-text-muted">
-              Kirim usulan agenda, jadwal, dan peserta rapat. Pengajuan disimpan
-              sebagai draf sampai jadwal difinalisasi oleh Pembina.
+              Kirim usulan agenda, jadwal, dan peserta rapat. Rapat tidak membutuhkan
+              proposal dan akan masuk ke daftar review Pembina sebelum difinalisasi.
             </p>
           </div>
 
@@ -399,7 +399,7 @@ export default function AjukanRapatModal({ member, divisi, onClose }) {
               </h3>
               <p className="mt-2 text-sm leading-6 text-emerald-800">
                 Kode rapat <span className="font-bold">{success.idReferensi}</span>{" "}
-                sudah dibuat dan menunggu finalisasi Pembina.
+                sudah dibuat dan menunggu review Pembina.
               </p>
               <button
                 type="button"

@@ -75,6 +75,17 @@ function labelStatusProposal(status) {
   );
 }
 
+function labelStatusPengajuanRapat(status) {
+  return (
+    {
+      menunggu_review: "Menunggu Review",
+      perlu_revisi: "Perlu Revisi",
+      disetujui: "Disetujui",
+      ditolak: "Ditolak",
+    }[status] || status || "Tidak diketahui"
+  );
+}
+
 function formatDateRange(activity) {
   if (!activity?.waktuMulai) return "Belum ditentukan";
   if (!activity?.waktuSelesai) return formatDateTime(activity.waktuMulai);
@@ -606,6 +617,59 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
               />
             </div>
           </section>
+
+          {isMeeting && activity?.pengajuanRapat && (
+            <section className="mt-6 rounded-3xl border border-blue-200 bg-blue-50/40 p-5 shadow-sm sm:p-6">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div className="flex items-start gap-3">
+                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-blue-100 text-blue-700">
+                    <AppIcon name="assignment_turned_in" size={22} />
+                  </span>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-blue-700">
+                      Asal Rapat
+                    </p>
+                    <h3 className="font-bold text-text">Pengajuan Rapat Anggota</h3>
+                    <p className="mt-1 text-xs leading-5 text-text-muted">
+                      Rapat ini berasal dari pengajuan anggota dan tidak menggunakan proposal.
+                    </p>
+                  </div>
+                </div>
+                <span className="inline-flex w-fit rounded-full bg-white px-3 py-1.5 text-[10px] font-bold text-blue-700 ring-1 ring-inset ring-blue-200">
+                  {labelStatusPengajuanRapat(activity.pengajuanRapat.status)}
+                </span>
+              </div>
+
+              <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <QuickInfo
+                  icon="person"
+                  label="Pengaju"
+                  value={activity?.pengaju?.namaLengkap || activity?.penanggungJawab?.namaLengkap || "Anggota OSIS"}
+                />
+                <QuickInfo
+                  icon="schedule"
+                  label="Diajukan Pada"
+                  value={formatDateTime(activity.pengajuanRapat.diajukanPada)}
+                />
+                <QuickInfo
+                  icon="groups"
+                  label="Peserta Final"
+                  value={`${activity?.pesertaFinal?.jumlahPeserta || activity?.kapasitasPeserta || 0} anggota`}
+                />
+              </div>
+
+              {activity.pengajuanRapat.catatanReview && (
+                <div className="mt-4 rounded-2xl border border-blue-100 bg-white/80 px-4 py-3">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">
+                    Catatan Review Pembina
+                  </p>
+                  <p className="mt-1.5 text-sm leading-6 text-text">
+                    {activity.pengajuanRapat.catatanReview}
+                  </p>
+                </div>
+              )}
+            </section>
+          )}
 
           {isProgramKerja && (
             <section className="mt-6 rounded-3xl border border-border bg-card p-5 shadow-sm sm:p-6">
