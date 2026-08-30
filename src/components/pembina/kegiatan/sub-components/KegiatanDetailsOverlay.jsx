@@ -285,8 +285,10 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
 
   const isMeeting = activity?.jenisKegiatan === JENIS_KEGIATAN.RAPAT;
   const isProgramKerja = !isMeeting;
-  const proposalAvailable = isMeeting || Boolean(proposal?.id);
-  const showFinalizationSections = isMeeting || Boolean(proposal?.id);
+  const activeProposal = proposal || activity?.proposal || null;
+  const activeProposalId = activeProposal?.id || activity?.idProposal || null;
+  const proposalAvailable = isMeeting || Boolean(activeProposalId);
+  const showFinalizationSections = isMeeting || Boolean(activeProposalId);
 
   // -------------------------------------------------------------------------
   // DEFAULT PESERTA
@@ -519,6 +521,28 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
     setMessage("");
 
     try {
+      const waktu = serverTimestamp();
+      const effectiveProposal = activeProposal || proposal || null;
+      const proposalStatus = effectiveProposal?.status || activity?.statusProposal;
+      const shouldApproveProposal =
+        isProgramKerja &&
+        effectiveProposal?.id &&
+        proposalStatus !== STATUS_PROPOSAL.DISETUJUI;
+
+      if (shouldApproveProposal) {
+        await updateDoc("Proposal", effectiveProposal.id, {
+          status: STATUS_PROPOSAL.DISETUJUI,
+          disetujuiPada: waktu,
+          diperbaruiPada: waktu,
+        });
+
+        await updateDoc("Kegiatan", activity.id, {
+          idProposal: effectiveProposal.id,
+          statusProposal: STATUS_PROPOSAL.DISETUJUI,
+          diperbaruiPada: waktu,
+        });
+      }
+
       const finalSchedule = buildFinalSchedule(activity, scheduleDraft);
       const activityForFinalization = {
         ...activity,
@@ -526,22 +550,27 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
         pengulanganFinal:
           activity?.pengulanganFinal || activity?.pengulanganRencana || null,
         sumberFinalisasiJadwal: SUMBER_FINALISASI_JADWAL.MANUAL,
+        statusProposal:
+          shouldApproveProposal ? STATUS_PROPOSAL.DISETUJUI : activity?.statusProposal,
       };
 
       const result = await finalisasiKegiatan({
         db,
         activity: activityForFinalization,
-        proposal,
+        proposal: shouldApproveProposal
+          ? { ...effectiveProposal, status: STATUS_PROPOSAL.DISETUJUI }
+          : effectiveProposal,
         participantIds: Array.from(selectedParticipantIds),
         serverTimestamp,
         updateDoc,
       });
 
       setFinalized(true);
-      if (proposal) {
+      if (effectiveProposal) {
         setProposal((current) => ({
-          ...current,
+          ...(current || effectiveProposal),
           status: STATUS_PROPOSAL.DISETUJUI,
+          disetujuiPada: waktu,
         }));
       }
       setMessage(

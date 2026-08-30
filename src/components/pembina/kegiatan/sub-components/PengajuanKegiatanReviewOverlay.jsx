@@ -197,10 +197,10 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
       (activity?.pesertaRencana ? "Peserta Usulan Anggota" : "Ditentukan Pembina"),
   }));
   const [reviewStatus, setReviewStatus] = useState(
-    activity?.pengajuanRapat?.status || STATUS_PENGAJUAN.MENUNGGU_REVIEW
+    pengajuan?.status || STATUS_PENGAJUAN.MENUNGGU_REVIEW
   );
   const [reviewNote, setReviewNote] = useState(
-    activity?.pengajuanRapat?.catatanReview || ""
+    pengajuan?.catatanReview || ""
   );
   const [schedule, setSchedule] = useState(() => buildInitialSchedule(activity));
   const [savingReview, setSavingReview] = useState(false);
@@ -234,8 +234,12 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
   );
 
   const isMeeting = activity?.jenisKegiatan === JENIS_KEGIATAN.RAPAT;
+  const isProgramKerja = activity?.jenisKegiatan === JENIS_KEGIATAN.PROGRAM_KERJA;
+  const pengajuan = activity?.pengajuanRapat || activity?.pengajuanProgramKerja || null;
   const pengaju =
-    activity?.pengaju || memberMap.get(activity?.pengajuanRapat?.idPengaju) || null;
+    activity?.pengaju ||
+    memberMap.get(pengajuan?.idPengaju || activity?.pengajuanRapat?.idPengaju) ||
+    null;
   const divisiPengaju =
     activity?.divisi ||
     (pengaju?.idDivisi ? divisionMap.get(pengaju.idDivisi) || null : null);
@@ -320,15 +324,17 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
 
     try {
       const waktu = serverTimestamp();
-      const current = activity?.pengajuanRapat || {};
+      const current = pengajuan || {};
+      const nextPayload = {
+        ...current,
+        status: nextStatus,
+        catatanReview: reviewNote.trim() || null,
+        ditinjauPada: waktu,
+      };
 
       await updateDoc("Kegiatan", activity.id, {
-        pengajuanRapat: {
-          ...current,
-          status: nextStatus,
-          catatanReview: reviewNote.trim() || null,
-          ditinjauPada: waktu,
-        },
+        ...(isMeeting ? { pengajuanRapat: nextPayload } : {}),
+        ...(isProgramKerja ? { pengajuanProgramKerja: nextPayload } : {}),
         diperbaruiPada: waktu,
       });
 
@@ -388,17 +394,21 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
           sampai: null,
         },
         sumberFinalisasiJadwal: SUMBER_FINALISASI_JADWAL.MANUAL,
-        pengajuanRapat: {
-          ...(activity?.pengajuanRapat || {}),
-          status: STATUS_PENGAJUAN.DISETUJUI,
-          catatanReview: reviewNote.trim() || null,
-          jadwalFinalPembina: {
-            tanggal: schedule.tanggal,
-            waktuMulai: schedule.waktuMulai,
-            waktuSelesai: schedule.waktuSelesai,
-            lokasi: schedule.lokasi.trim(),
-          },
-        },
+        ...(isMeeting
+          ? {
+              pengajuanRapat: {
+                ...(activity?.pengajuanRapat || {}),
+                status: STATUS_PENGAJUAN.DISETUJUI,
+                catatanReview: reviewNote.trim() || null,
+                jadwalFinalPembina: {
+                  tanggal: schedule.tanggal,
+                  waktuMulai: schedule.waktuMulai,
+                  waktuSelesai: schedule.waktuSelesai,
+                  lokasi: schedule.lokasi.trim(),
+                },
+              },
+            }
+          : {}),
       };
 
       const result = await finalisasiKegiatan({

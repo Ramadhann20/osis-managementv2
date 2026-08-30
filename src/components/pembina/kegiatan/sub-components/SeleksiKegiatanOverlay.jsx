@@ -1020,8 +1020,7 @@ export default function SeleksiKegiatanModal({
       }
     }
 
-    const shouldGenerateChildren =
-      activityType === JENIS_KEGIATAN.RAPAT || shouldFinalizeWorkProgram;
+    const shouldGenerateChildren = shouldFinalizeWorkProgram;
 
     const effectiveScheduleForm =
       shouldFinalizeWorkProgram ? finalScheduleForm : form;
@@ -1199,18 +1198,9 @@ export default function SeleksiKegiatanModal({
 
         jadwalFinal: resolvedFinalSchedulePayload,
         pengulanganFinal: resolvedFinalRecurrencePayload,
-        statusJadwal:
-          activityType === JENIS_KEGIATAN.PROGRAM_KERJA
-            ? STATUS_JADWAL.DIRENCANAKAN
-            : STATUS_JADWAL.DIFINALISASI,
-        sumberFinalisasiJadwal:
-          activityType === JENIS_KEGIATAN.RAPAT
-            ? SUMBER_FINALISASI_JADWAL.LANGSUNG
-            : null,
-        difinalisasiPada:
-          activityType === JENIS_KEGIATAN.RAPAT
-            ? serverTimestamp()
-            : null,
+        statusJadwal: STATUS_JADWAL.DIRENCANAKAN,
+        sumberFinalisasiJadwal: null,
+        difinalisasiPada: null,
 
         idDivisi: form.divisionId || null,
         idPenanggungJawab: form.organiserMemberId || null,
@@ -1433,23 +1423,6 @@ export default function SeleksiKegiatanModal({
                   }`}
                   aria-hidden={proposalPanelOpen}
                 >
-                  <div className="mb-6">
-                    <div className="inline-flex w-full rounded-2xl bg-input p-1 sm:w-auto">
-                      <TypeTab
-                        active={activityType === JENIS_KEGIATAN.PROGRAM_KERJA}
-                        icon="campaign"
-                        label="Program Kerja"
-                        onClick={() => changeType("work_program")}
-                      />
-                      <TypeTab
-                        active={activityType === JENIS_KEGIATAN.RAPAT}
-                        icon="groups"
-                        label="Meeting"
-                        onClick={() => changeType("meeting")}
-                      />
-                    </div>
-                  </div>
-
                   <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
                     <FormField className="sm:col-span-2" label="Nama kegiatan" required>
                       <input

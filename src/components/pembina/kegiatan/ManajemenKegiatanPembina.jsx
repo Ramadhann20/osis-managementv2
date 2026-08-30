@@ -256,69 +256,32 @@ function ActivitiesTab({
     setStatusFilter("semua");
   };
 
-  const typeSelector = (
-    <section className="mt-6 flex flex-col gap-4 rounded-2xl border border-border bg-card p-5 shadow-sm lg:flex-row lg:items-center lg:justify-between">
-      <div>
-        <p className="text-xs font-bold uppercase tracking-[0.14em] text-primary">
-          Tipe Kegiatan
-        </p>
-        <h2 className="mt-1 font-bold text-text">Pilih Program Kerja atau Rapat</h2>
-        <p className="mt-1 text-xs leading-5 text-text-muted">
-          Setiap tipe ditampilkan dan dikelola melalui komponen terpisah.
-        </p>
-      </div>
-
-      <Tabs
-        value={activityType}
-        onChange={handleTypeChange}
-        items={[
-          {
-            value: JENIS_KEGIATAN.PROGRAM_KERJA,
-            label: `Program Kerja (${workProgramRows.length})`,
-          },
-          {
-            value: JENIS_KEGIATAN.RAPAT,
-            label: `Rapat (${meetingRows.length})`,
-          },
-        ]}
-      />
-    </section>
-  );
-
   return (
-    <div className="mt-6">
-      {typeSelector}
+    <div className="mt-6 space-y-8">
+      <PengajuanKegiatanCollapsible
+        rows={rows}
+        jenisKegiatan={JENIS_KEGIATAN.RAPAT}
+        onOpenReview={onReviewPengajuan}
+      />
 
-      {activityType === JENIS_KEGIATAN.RAPAT && (
-        <PengajuanKegiatanCollapsible
-          rows={rows}
-          jenisKegiatan={JENIS_KEGIATAN.RAPAT}
-          onOpenReview={onReviewPengajuan}
+      <div className="space-y-8">
+        <ProgramKerjaSection
+          rows={workProgramRows}
+          search={search}
+          setSearch={setSearch}
+          statusFilter={statusFilter}
+          setStatusFilter={setStatusFilter}
+          onOpenDetail={onOpenDetail}
         />
-      )}
 
-      <div className="mt-7">
-        {activityType === JENIS_KEGIATAN.PROGRAM_KERJA && (
-          <ProgramKerjaSection
-            rows={workProgramRows}
-            search={search}
-            setSearch={setSearch}
-            statusFilter={statusFilter}
-            setStatusFilter={setStatusFilter}
-            onOpenDetail={onOpenDetail}
-          />
-        )}
-
-        {activityType === JENIS_KEGIATAN.RAPAT && (
-          <RapatSection
-            rows={meetingRows}
-            search={search}
-            setSearch={setSearch}
-            statusFilter={statusFilter}
-            setStatusFilter={setStatusFilter}
-            onOpenDetail={onOpenDetail}
-          />
-        )}
+        <RapatSection
+          rows={meetingRows}
+          search={search}
+          setSearch={setSearch}
+          statusFilter={statusFilter}
+          setStatusFilter={setStatusFilter}
+          onOpenDetail={onOpenDetail}
+        />
       </div>
     </div>
   );
