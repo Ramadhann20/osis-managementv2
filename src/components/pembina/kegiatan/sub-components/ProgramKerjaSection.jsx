@@ -72,6 +72,11 @@ function proposalMarker(activity) {
 function sortByNearestStart(rows) {
   const now = Date.now();
   return [...rows].sort((a, b) => {
+    const aDone = a?.status === STATUS_KEGIATAN.SELESAI ? 1 : 0;
+    const bDone = b?.status === STATUS_KEGIATAN.SELESAI ? 1 : 0;
+
+    if (aDone !== bDone) return aDone - bDone;
+
     const aStamp = a?.waktuMulai ? new Date(a.waktuMulai).getTime() : Number.MAX_SAFE_INTEGER;
     const bStamp = b?.waktuMulai ? new Date(b.waktuMulai).getTime() : Number.MAX_SAFE_INTEGER;
     return Math.abs(aStamp - now) - Math.abs(bStamp - now);

@@ -181,6 +181,11 @@ export function usePengajuanKegiatanReviewOverlay() {
 
 export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
   const { db, colRef, updateDoc, serverTimestamp } = useDb();
+  const isMeeting = activity?.jenisKegiatan === JENIS_KEGIATAN.RAPAT;
+  const isProgramKerja = activity?.jenisKegiatan === JENIS_KEGIATAN.PROGRAM_KERJA;
+  const pengajuan =
+    activity?.pengajuanRapat || activity?.pengajuanProgramKerja || null;
+
   const [visible, setVisible] = useState(false);
   const [participantPickerMode, setParticipantPickerMode] = useState(null);
   const [selectedParticipantIds, setSelectedParticipantIds] = useState(
@@ -233,9 +238,6 @@ export default function PengajuanKegiatanReviewModal({ activity, onClose }) {
     [divisi]
   );
 
-  const isMeeting = activity?.jenisKegiatan === JENIS_KEGIATAN.RAPAT;
-  const isProgramKerja = activity?.jenisKegiatan === JENIS_KEGIATAN.PROGRAM_KERJA;
-  const pengajuan = activity?.pengajuanRapat || activity?.pengajuanProgramKerja || null;
   const pengaju =
     activity?.pengaju ||
     memberMap.get(pengajuan?.idPengaju || activity?.pengajuanRapat?.idPengaju) ||

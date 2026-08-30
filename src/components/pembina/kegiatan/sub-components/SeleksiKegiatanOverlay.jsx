@@ -1020,26 +1020,15 @@ export default function SeleksiKegiatanModal({
       }
     }
 
-    const shouldGenerateChildren = shouldFinalizeWorkProgram;
+    // Draft dibuat untuk menunggu finalisasi pembina. Child data
+    // PelaksanaanKegiatan/SesiAbsensi hanya dibuat saat finalisasi yang sah,
+    // bukan ketika dokumen masih dalam status draft.
+    const shouldGenerateChildren = false;
 
-    const effectiveScheduleForm =
-      shouldFinalizeWorkProgram ? finalScheduleForm : form;
+    const effectiveScheduleForm = form;
+    const effectiveBaseSessions = baseSessions;
 
-    const effectiveBaseSessions =
-      shouldFinalizeWorkProgram ? finalBaseSessions : baseSessions;
-
-    const occurrences = shouldGenerateChildren
-      ? buildOccurrences(
-          effectiveScheduleForm,
-          effectiveBaseSessions,
-          MAX_SERIES_OCCURRENCES
-        )
-      : [];
-
-    if (shouldGenerateChildren && !occurrences.length) {
-      setError("Tidak ada pelaksanaan final yang dapat dibuat dari jadwal tersebut.");
-      return;
-    }
+    const occurrences = [];
 
     const plannedTotalSessionCount = plannedOccurrences.reduce(
       (total, occurrence) => total + occurrence.sessions.length,
