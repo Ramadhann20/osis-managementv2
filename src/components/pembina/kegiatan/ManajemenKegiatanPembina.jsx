@@ -186,7 +186,6 @@ export default function ManajemenKegiatanPembina() {
         items={[
           { value: "kegiatan", label: "Kegiatan" },
           { value: "proposal", label: "Proposal" },
-          { value: "laporan", label: "Laporan" },
         ]}
       />
 
@@ -211,18 +210,10 @@ export default function ManajemenKegiatanPembina() {
           setSearch={setSearch}
           statusFilter={statusFilter}
           setStatusFilter={setStatusFilter}
+          onOpenDetail={openKegiatanDetails}
         />
       )}
 
-      {tab === "laporan" && (
-        <ReportsTab
-          rows={data.barisKegiatan}
-          search={search}
-          setSearch={setSearch}
-          statusFilter={statusFilter}
-          setStatusFilter={setStatusFilter}
-        />
-      )}
     </div>
   );
 }
@@ -287,7 +278,7 @@ function ActivitiesTab({
   );
 }
 
-function ProposalsTab({ rows, search, setSearch, statusFilter, setStatusFilter }) {
+function ProposalsTab({ rows, search, setSearch, statusFilter, setStatusFilter, onOpenDetail }) {
   const keyword = search.trim().toLowerCase();
   const filtered = rows.filter((item) => {
     return (
@@ -330,7 +321,11 @@ function ProposalsTab({ rows, search, setSearch, statusFilter, setStatusFilter }
               </thead>
               <tbody className="divide-y divide-border">
                 {filtered.map((proposal) => (
-                  <tr key={proposal.id}>
+                  <tr
+                    key={proposal.id}
+                    onClick={() => proposal.kegiatan && onOpenDetail(proposal.kegiatan)}
+                    className="cursor-pointer transition hover:bg-surface"
+                  >
                     <td className="px-5 py-4">
                       <p className="text-sm font-semibold text-text">
                         {proposal.kegiatan?.namaKegiatan || proposal.namaKegiatan || "-"}
@@ -369,11 +364,8 @@ function ProposalsTab({ rows, search, setSearch, statusFilter, setStatusFilter }
                       <BadgeStatus status={proposal.status} jenis="proposal" />
                     </td>
                     <td className="px-5 py-4">
-                      <div className="flex justify-end gap-1">
-                        <IconAction icon="visibility" label="Lihat File" />
-                        <IconAction icon="check" label="Setujui" />
-                        <IconAction icon="edit" label="Revisi" />
-                        <IconAction icon="close" label="Tolak" danger />
+                      <div className="flex justify-end">
+                        <AppIcon name="arrow_forward_ios" size={18} className="text-text-muted" />
                       </div>
                     </td>
                   </tr>

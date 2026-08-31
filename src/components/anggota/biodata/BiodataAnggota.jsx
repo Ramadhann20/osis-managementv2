@@ -110,14 +110,6 @@ export default function BiodataAnggota() {
         eyebrow="Profil Anggota"
         title="Biodata Anggota"
         description="Informasi pribadi, kontak, dan posisi organisasi yang tersimpan di Firestore."
-        action={
-          <div className="flex flex-wrap gap-3">
-            <DisabledAction icon="arrow_back" variant="outline">
-              Kembali
-            </DisabledAction>
-            <DisabledAction icon="edit">Edit Data</DisabledAction>
-          </div>
-        }
       />
 
       <section className="relative overflow-hidden rounded-2xl border border-border bg-card p-6 shadow-sm">
