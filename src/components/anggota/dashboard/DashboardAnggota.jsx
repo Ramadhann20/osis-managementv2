@@ -6,7 +6,6 @@ import { useMemo } from "react";
 import AppIcon from "@/components/global/AppIcon";
 import { useDb } from "@/context/DbContext";
 import { useCollection } from "@/hooks/useCollection";
-import { useDoc } from "@/hooks/useDoc";
 import { useCurrentMember } from "@/components/anggota/_shared/useCurrentMember";
 import {
   formatShortDate,
@@ -152,10 +151,6 @@ export default function DashboardAnggota() {
     enabled: true,
   });
 
-  const contacts = useDoc("KontakSistem", "osis-sma-mutiara-2", {
-    enabled: true,
-  });
-
   const loading =
     memberLoading ||
     attendance.loading ||
@@ -164,8 +159,7 @@ export default function DashboardAnggota() {
     activities.loading ||
     sessions.loading ||
     announcements.loading ||
-    divisions.loading ||
-    contacts.loading;
+    divisions.loading;
 
   const error =
     memberError ||
@@ -175,8 +169,7 @@ export default function DashboardAnggota() {
     activities.error ||
     sessions.error ||
     announcements.error ||
-    divisions.error ||
-    contacts.error;
+    divisions.error;
 
   const data = useMemo(() => {
     const activityRows = rowsOf(activities);
