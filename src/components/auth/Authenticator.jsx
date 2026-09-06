@@ -1,130 +1,328 @@
 "use client";
 
-import { useEffect } from "react";
-import { usePathname, useRouter } from "next/navigation";
-import { useAuth } from "@/context/AuthContext";
 
-const PUBLIC_ROUTES = ["/login", "/register"];
+import { 
+  useEffect 
+} from "react";
+
+
+import {
+  usePathname,
+  useRouter
+} from "next/navigation";
+
+
+import {
+  useAuth
+} from "@/context/AuthContext";
+
+
+
+const PUBLIC_ROUTES = [
+  "/login",
+  "/register"
+];
+
+
 
 const ROLE_HOME = {
-  anggota: "/anggota/dashboard",
-  pembina: "/pembina/dashboard",
+
+  anggota:
+  "/anggota/dashboard",
+
+  pembina:
+  "/pembina/dashboard"
+
 };
 
-function matchRoute(pathname, route) {
-  return pathname === route || pathname.startsWith(`${route}/`);
+
+
+function matchRoute(pathname, route){
+
+  return (
+    pathname === route ||
+    pathname.startsWith(`${route}/`)
+  );
+
 }
 
-export default function Authenticator({ children }) {
-  const router = useRouter();
-  const pathname = usePathname();
 
-  const {
-    user,
-    role,
-    accessLoading,
-  } = useAuth();
 
-  const currentPath = pathname || "/";
-  const normalizedRole = String(role || "").trim().toLowerCase();
+export default function Authenticator({
+  children
+}){
 
-  const isRootRoute = currentPath === "/";
 
-  const isPublicRoute = PUBLIC_ROUTES.some((route) =>
-    matchRoute(currentPath, route)
-  );
+const router = useRouter();
 
-  const isPendaftaranRoute = matchRoute(
-    currentPath,
-    "/pendaftaran"
-  );
+const pathname = usePathname();
 
-  const isAnggotaRoute = matchRoute(
-    currentPath,
-    "/anggota/dashboard"
-  );
 
-  const isPembinaRoute = matchRoute(
-    currentPath,
-    "/pembina/dashboard"
-  );
+const {
 
-  const hasValidRole =
-    normalizedRole === "anggota" ||
-    normalizedRole === "pembina";
+user,
 
-  let redirectTo = null;
+role,
 
-  if (!accessLoading) {
-    /*
-     * Belum login.
-     * Hanya boleh membuka login dan register.
-     */
-    if (!user && !isPublicRoute) {
-      redirectTo = "/login";
-    }
+accessLoading
 
-    /*
-     * Sudah login, tetapi belum mendapatkan role.
-     * Berlaku untuk:
-     * - belum mengisi formulir
-     * - sedang menunggu review
-     * - pendaftaran ditolak
-     */
-    if (
-      user &&
-      !hasValidRole &&
-      !isPendaftaranRoute
-    ) {
-      redirectTo = "/pendaftaran";
-    }
+}=useAuth();
 
-    /*
-     * Anggota.
-     */
-    if (user && normalizedRole === "anggota") {
-      const mustGoToAnggotaDashboard =
-        isRootRoute ||
-        isPublicRoute ||
-        isPendaftaranRoute ||
-        isPembinaRoute;
 
-      if (mustGoToAnggotaDashboard) {
-        redirectTo = ROLE_HOME.anggota;
-      }
-    }
 
-    /*
-     * Pembina.
-     */
-    if (user && normalizedRole === "pembina") {
-      const mustGoToPembinaDashboard =
-        isRootRoute ||
-        isPublicRoute ||
-        isPendaftaranRoute ||
-        isAnggotaRoute;
+const currentPath =
+pathname || "/";
 
-      if (mustGoToPembinaDashboard) {
-        redirectTo = ROLE_HOME.pembina;
-      }
-    }
-  }
 
-  useEffect(() => {
-    if (redirectTo && redirectTo !== currentPath) {
-      router.replace(redirectTo);
-    }
-  }, [redirectTo, currentPath, router]);
 
-  if (accessLoading || redirectTo) {
-    return (
-      <main className="flex min-h-screen items-center justify-center bg-surface">
-        <div className="rounded-2xl border border-border bg-card px-6 py-4 text-sm text-text-muted shadow-sm">
-          Memeriksa akses...
-        </div>
-      </main>
-    );
-  }
+const normalizedRole =
+String(role || "")
+.trim()
+.toLowerCase();
 
-  return <>{children}</>;
+
+
+const isRootRoute =
+currentPath === "/";
+
+
+
+const isPublicRoute =
+PUBLIC_ROUTES.some(
+(route)=>
+matchRoute(
+currentPath,
+route
+)
+);
+
+
+
+const isAnggotaRoute =
+matchRoute(
+currentPath,
+"/anggota"
+);
+
+
+
+const isPembinaRoute =
+matchRoute(
+currentPath,
+"/pembina"
+);
+
+
+
+const isPendaftaranRoute =
+matchRoute(
+currentPath,
+"/pendaftaran"
+);
+
+
+
+const hasRole =
+normalizedRole === "anggota" ||
+normalizedRole === "pembina";
+
+
+
+let redirectTo = null;
+
+
+
+if(!accessLoading){
+
+
+
+/*
+|--------------------------------------------------------------------------
+| BELUM LOGIN
+|--------------------------------------------------------------------------
+*/
+
+
+if(!user){
+
+
+/*
+Landing boleh
+Login/Register boleh
+*/
+
+
+if(
+!isRootRoute &&
+!isPublicRoute
+){
+
+redirectTo="/";
+
+}
+
+
+}
+
+
+
+/*
+|--------------------------------------------------------------------------
+| SUDAH LOGIN TAPI ROLE BELUM ADA
+|--------------------------------------------------------------------------
+*/
+
+
+if(
+user &&
+!hasRole
+){
+
+
+if(
+!isPendaftaranRoute
+){
+
+redirectTo="/pendaftaran";
+
+}
+
+
+}
+
+
+
+/*
+|--------------------------------------------------------------------------
+| LOGIN SEBAGAI ANGGOTA
+|--------------------------------------------------------------------------
+*/
+
+
+if(
+user &&
+normalizedRole==="anggota"
+){
+
+
+if(
+isRootRoute ||
+isPublicRoute ||
+isPembinaRoute
+){
+
+redirectTo=
+ROLE_HOME.anggota;
+
+}
+
+
+}
+
+
+
+/*
+|--------------------------------------------------------------------------
+| LOGIN SEBAGAI PEMBINA
+|--------------------------------------------------------------------------
+*/
+
+
+if(
+user &&
+normalizedRole==="pembina"
+){
+
+
+if(
+isRootRoute ||
+isPublicRoute ||
+isAnggotaRoute
+){
+
+redirectTo=
+ROLE_HOME.pembina;
+
+}
+
+
+}
+
+
+
+}
+
+
+
+useEffect(()=>{
+
+
+if(
+redirectTo &&
+redirectTo !== currentPath
+){
+
+router.replace(
+redirectTo
+);
+
+}
+
+
+},[
+redirectTo,
+currentPath,
+router
+]);
+
+
+
+
+
+if(
+accessLoading ||
+redirectTo
+){
+
+return (
+
+<main
+className="
+min-h-screen
+flex
+items-center
+justify-center
+bg-surface
+"
+>
+
+<div
+className="
+rounded-xl
+border
+border-border
+bg-card
+px-6
+py-4
+shadow-sm
+text-text-muted
+"
+>
+
+Memeriksa akses...
+
+</div>
+
+
+</main>
+
+)
+
+}
+
+
+
+return children;
+
+
 }
