@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { doc, writeBatch } from "firebase/firestore";
 
 import AppIcon from "@/components/global/AppIcon";
 import { useDb } from "@/context/DbContext";
@@ -44,7 +45,7 @@ import {
 } from "./konfigurasiManajemenKegiatan";
 
 export default function ManajemenKegiatanPembina() {
-  const { colRef } = useDb();
+  const { db, colRef, serverTimestamp } = useDb();
   const { openKegiatanDetails } = useKegiatanDetailsOverlay();
   const { openReviewPengajuanKegiatan } = usePengajuanKegiatanReviewOverlay();
 
@@ -66,9 +67,70 @@ export default function ManajemenKegiatanPembina() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("semua");
   const [jenisKegiatan, setJenisKegiatan] = useState(JENIS_KEGIATAN.PROGRAM_KERJA);
+  const [proposalActionId, setProposalActionId] = useState(null);
+  const [proposalFeedback, setProposalFeedback] = useState(null);
 
   const loading = isLoading(kegiatan, proposal, anggota, divisi);
   const error = firstError(kegiatan, proposal, anggota, divisi);
+
+  const handleProposalDecision = async (proposalRow, status) => {
+    if (!proposalRow?.id || proposalActionId) return;
+    if (status === STATUS_PROPOSAL.DITOLAK &&
+      !window.confirm(`Tolak proposal ${proposalRow.namaFile || "ini"}?`)) {
+      return;
+    }
+
+    setProposalActionId(proposalRow.id);
+    setProposalFeedback(null);
+
+    try {
+      const waktu = serverTimestamp();
+      const activity = proposalRow.kegiatan;
+      const pengajuanKey = activity?.pengajuanProgramKerja
+        ? "pengajuanProgramKerja"
+        : activity?.pengajuanRapat
+          ? "pengajuanRapat"
+          : activity?.pengajuanKegiatan
+            ? "pengajuanKegiatan"
+            : null;
+      const batch = writeBatch(db);
+      const proposalRef = doc(db, KOLEKSI.PROPOSAL, proposalRow.id);
+      const activityRef = activity?.id
+        ? doc(db, KOLEKSI.KEGIATAN, activity.id)
+        : null;
+
+      batch.update(proposalRef, {
+        status,
+        diperbaruiPada: waktu,
+        ...(status === STATUS_PROPOSAL.PERLU_REVISI
+          ? { catatanReview: "Proposal perlu diperbaiki oleh anggota." }
+          : {}),
+      });
+
+      if (activityRef) {
+        batch.update(activityRef, {
+          statusProposal: status,
+          ...(pengajuanKey
+            ? { [pengajuanKey]: { ...activity[pengajuanKey], status } }
+            : {}),
+          diperbaruiPada: waktu,
+        });
+      }
+      await batch.commit();
+      setProposalFeedback({
+        type: "success",
+        message: `Proposal berhasil diubah menjadi ${status === STATUS_PROPOSAL.DISETUJUI ? "disetujui" : status === STATUS_PROPOSAL.PERLU_REVISI ? "perlu revisi" : "ditolak"}.`,
+      });
+    } catch (decisionError) {
+      console.error("REVIEW PROPOSAL ERROR:", decisionError);
+      setProposalFeedback({
+        type: "error",
+        message: decisionError?.message || "Proposal belum berhasil diproses.",
+      });
+    } finally {
+      setProposalActionId(null);
+    }
+  };
 
   const data = useMemo(() => {
     const barisKegiatan = rowsOf(kegiatan);
@@ -189,6 +251,12 @@ export default function ManajemenKegiatanPembina() {
         ]}
       />
 
+      {proposalFeedback && (
+        <div className={`mt-5 rounded-xl px-4 py-3 text-sm font-medium ${proposalFeedback.type === "error" ? "bg-error-bg text-error-text" : "bg-emerald-50 text-emerald-800"}`}>
+          {proposalFeedback.message}
+        </div>
+      )}
+
       {tab === "kegiatan" && (
         <ActivitiesTab
           rows={data.barisKegiatan}
@@ -210,6 +278,8 @@ export default function ManajemenKegiatanPembina() {
           setSearch={setSearch}
           statusFilter={statusFilter}
           setStatusFilter={setStatusFilter}
+          onDecision={handleProposalDecision}
+          proposalActionId={proposalActionId}
           onOpenDetail={openKegiatanDetails}
         />
       )}
@@ -278,7 +348,7 @@ function ActivitiesTab({
   );
 }
 
-function ProposalsTab({ rows, search, setSearch, statusFilter, setStatusFilter, onOpenDetail }) {
+function ProposalsTab({ rows, search, setSearch, statusFilter, setStatusFilter, onDecision, proposalActionId, onOpenDetail }) {
   const keyword = search.trim().toLowerCase();
   const filtered = rows.filter((item) => {
     return (
@@ -364,8 +434,43 @@ function ProposalsTab({ rows, search, setSearch, statusFilter, setStatusFilter, 
                       <BadgeStatus status={proposal.status} jenis="proposal" />
                     </td>
                     <td className="px-5 py-4">
-                      <div className="flex justify-end">
-                        <AppIcon name="arrow_forward_ios" size={18} className="text-text-muted" />
+                      <div className="flex justify-end gap-1">
+                        <a
+                          href={proposal.urlFile || "#"}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label="Lihat File"
+                          className="rounded-lg p-2 text-primary hover:bg-primary/10"
+                        >
+                          <AppIcon name="visibility" size={18} />
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => onOpenDetail?.(proposal)}
+                          aria-label="Buka Detail"
+                          className="rounded-lg p-2 text-text-muted hover:bg-surface"
+                        >
+                          <AppIcon name="arrow_forward_ios" size={18} className="text-text-muted" />
+                        </button>
+                        <IconAction
+                          icon="check"
+                          label="Setujui"
+                          disabled={proposalActionId === proposal.id}
+                          onClick={() => onDecision?.(proposal, STATUS_PROPOSAL.DISETUJUI)}
+                        />
+                        <IconAction
+                          icon="edit"
+                          label="Revisi"
+                          disabled={proposalActionId === proposal.id}
+                          onClick={() => onDecision?.(proposal, STATUS_PROPOSAL.PERLU_REVISI)}
+                        />
+                        <IconAction
+                          icon="close"
+                          label="Tolak"
+                          danger
+                          disabled={proposalActionId === proposal.id}
+                          onClick={() => onDecision?.(proposal, STATUS_PROPOSAL.DITOLAK)}
+                        />
                       </div>
                     </td>
                   </tr>
@@ -660,13 +765,14 @@ function FilterBar({
   );
 }
 
-function IconAction({ icon, label, danger = false }) {
+function IconAction({ icon, label, danger = false, disabled = false, onClick }) {
   return (
     <button
       type="button"
-      disabled
-      title={`${label} akan diaktifkan pada tahap berikutnya`}
-      className={`rounded-lg p-2 opacity-60 ${danger ? "text-error-text" : "text-primary"}`}
+      disabled={disabled}
+      onClick={onClick}
+      title={label}
+      className={`rounded-lg p-2 transition hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50 ${danger ? "text-error-text" : "text-primary"}`}
     >
       <AppIcon name={icon} size={18} />
     </button>

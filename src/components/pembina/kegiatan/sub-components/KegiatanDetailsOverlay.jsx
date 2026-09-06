@@ -19,7 +19,6 @@ import {
 } from "../konfigurasiManajemenKegiatan";
 import PilihPesertaKegiatanOverlay from "./PilihPesertaKegiatanOverlay";
 import { finalisasiKegiatan } from "./finalisasiKegiatan";
-import { hapusKegiatanBersih } from "./hapusKegiatanBersih";
 
 function rowsOf(result) {
   return Array.isArray(result?.rows) ? result.rows : [];
@@ -247,8 +246,6 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
   const [uploadingProposal, setUploadingProposal] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const [rejecting, setRejecting] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [finalized, setFinalized] = useState(
     [
       STATUS_KEGIATAN.AKAN_DATANG,
@@ -573,9 +570,8 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
       setDeleting(false);
     }
   };
-
   const handleRejectProposal = async () => {
-    if (!proposal?.id || finalized || rejecting || deleting) return;
+    if (!proposal?.id || finalized || rejecting) return;
     setRejecting(true);
     setError("");
     setMessage("");
@@ -614,8 +610,38 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
     }
   };
 
+  const handleRequestProposalRevision = async () => {
+    if (!proposal?.id || finalized || rejecting) return;
+
+    setRejecting(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const waktu = serverTimestamp();
+      await updateDoc("Proposal", proposal.id, {
+        status: STATUS_PROPOSAL.PERLU_REVISI,
+        diperbaruiPada: waktu,
+      });
+      await updateDoc("Kegiatan", activity.id, {
+        statusProposal: STATUS_PROPOSAL.PERLU_REVISI,
+        diperbaruiPada: waktu,
+      });
+      setProposal((current) => ({
+        ...current,
+        status: STATUS_PROPOSAL.PERLU_REVISI,
+      }));
+      setMessage("Proposal dikembalikan untuk diperbaiki oleh anggota.");
+    } catch (revisionError) {
+      console.error("MINTA REVISI PROPOSAL ERROR:", revisionError);
+      setError(revisionError?.message || "Proposal belum berhasil dikembalikan untuk revisi.");
+    } finally {
+      setRejecting(false);
+    }
+  };
+
   const handleFinalize = async () => {
-    if (!canFinalize || finalizing || deleting) return;
+    if (!canFinalize || finalizing) return;
     setFinalizing(true);
     setError("");
     setMessage("");
@@ -1175,48 +1201,6 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
           )}
         </div>
 
-        {deleteConfirmOpen && (
-          <section className="shrink-0 border-t border-red-200 bg-red-50 px-5 py-4 sm:px-7">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex items-start gap-3">
-                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-100 text-red-700">
-                  <AppIcon name="delete" size={20} />
-                </span>
-                <div>
-                  <p className="text-sm font-bold text-red-800">
-                    Hapus kegiatan secara permanen?
-                  </p>
-                  <p className="mt-1 max-w-2xl text-xs leading-5 text-red-700">
-                    Proposal, pelaksanaan, seluruh sesi absensi, dan data absensi
-                    yang terhubung akan ikut dibersihkan. Tindakan ini tidak dapat
-                    dibatalkan.
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex shrink-0 flex-wrap gap-2 lg:justify-end">
-                <button
-                  type="button"
-                  disabled={deleting}
-                  onClick={() => setDeleteConfirmOpen(false)}
-                  className="min-h-10 rounded-xl border border-red-200 bg-white px-4 text-xs font-bold text-red-700 transition hover:bg-red-100 disabled:opacity-50"
-                >
-                  Batal
-                </button>
-                <button
-                  type="button"
-                  disabled={deleting}
-                  onClick={handleDeleteActivity}
-                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-red-600 px-4 text-xs font-bold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <AppIcon name="delete" size={17} />
-                  {deleting ? "Menghapus..." : "Ya, Hapus Permanen"}
-                </button>
-              </div>
-            </div>
-          </section>
-        )}
-
         <footer className="shrink-0 border-t border-border bg-card/95 px-5 py-4 backdrop-blur sm:px-7">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-xs leading-5 text-text-muted">
@@ -1236,23 +1220,8 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
             <div className="flex flex-wrap gap-2 sm:justify-end">
               <button
                 type="button"
-                disabled={deleting || finalizing || rejecting}
-                onClick={() => {
-                  setDeleteConfirmOpen(true);
-                  setError("");
-                  setMessage("");
-                }}
-                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-red-200 bg-card px-4 text-sm font-bold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <AppIcon name="delete" size={18} />
-                Hapus Kegiatan
-              </button>
-
-              <button
-                type="button"
-                disabled={deleting}
                 onClick={handleClose}
-                className="min-h-11 rounded-xl border border-border bg-card px-4 text-sm font-bold text-text hover:bg-surface disabled:opacity-50"
+                className="min-h-11 rounded-xl border border-border bg-card px-4 text-sm font-bold text-text hover:bg-surface"
               >
                 Tutup
               </button>
@@ -1260,7 +1229,19 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
               {isProgramKerja && proposal && !finalized && (
                 <button
                   type="button"
-                  disabled={rejecting || finalizing || deleting}
+                  disabled={rejecting || finalizing}
+                  onClick={handleRequestProposalRevision}
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 text-sm font-bold text-amber-700 transition hover:bg-amber-100 disabled:opacity-50"
+                >
+                  <AppIcon name="edit_note" size={18} />
+                  {rejecting ? "Memproses..." : "Minta Revisi"}
+                </button>
+              )}
+
+              {isProgramKerja && proposal && !finalized && (
+                <button
+                  type="button"
+                  disabled={rejecting || finalizing}
                   onClick={handleRejectProposal}
                   className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 text-sm font-bold text-red-700 transition hover:bg-red-100 disabled:opacity-50"
                 >
@@ -1272,7 +1253,7 @@ export default function KegiatanDetailsModal({ activity, onClose }) {
               {showFinalizationSections && !finalized && (
                 <button
                   type="button"
-                  disabled={!canFinalize || finalizing || rejecting || deleting}
+                  disabled={!canFinalize || finalizing || rejecting}
                   onClick={handleFinalize}
                   className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-primary px-5 text-sm font-bold text-white transition hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
                 >
